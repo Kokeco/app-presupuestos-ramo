@@ -544,36 +544,6 @@ with tab_actual:
     cols_to_show = list(dict.fromkeys([c for c in cols_to_show if c in filtered.columns]))
     st.dataframe(filtered[cols_to_show].sort_values("Var_vs_Budget", ascending=False), use_container_width=True, height=300)
 
-with tab_5y:
-    st.subheader("Simulación a 5 Años basada en Sensibilidad Operativa")
-    st.caption(f"Aplicando Inflación: {cagr_inf}% y Crecimiento de Operaciones: {cagr_ops}% sobre el Forecast simulado de cierre de año.")
-    
-    # Escudo protector: verificamos que la tabla no esté vacía por los filtros
-    if len(filtered) > 0:
-        # 1. Calculamos la proyección
-        df_5y = simular_5_anos(filtered, cagr_inf, cagr_ops)
-        
-        # 2. Agrupamos por el contexto para el gráfico
-        resumen_5y = df_5y.groupby("Contexto_Mina")[["Año_0_Base", "Año_1", "Año_2", "Año_3", "Año_4", "Año_5"]].sum().reset_index()
-        
-        # Transformar a formato largo para Plotly
-        resumen_largo = resumen_5y.melt(id_vars="Contexto_Mina", var_name="Año", value_name="Presupuesto Proyectado")
-        
-        # 3. Gráfico de Áreas Apiladas
-        fig_5y = px.area(
-            resumen_largo, 
-            x="Año", 
-            y="Presupuesto Proyectado", 
-            color="Contexto_Mina",
-            title="Evolución Estructural del Presupuesto (5 Años)",
-            markers=True
-        )
-        st.plotly_chart(fig_5y, use_container_width=True)
-        
-        # 4. Tabla resumen financiera
-        st.markdown("**Matriz Financiera de Proyección LRP**")
-        st.dataframe(resumen_5y, use_container_width=True)
-
 def to_excel_completo(
     df_forecast: pd.DataFrame,
     summary_forecast: pd.DataFrame,
@@ -691,6 +661,35 @@ def to_excel_completo(
 
     return output.getvalue()
 
+with tab_5y:
+    st.subheader("Simulación a 5 Años basada en Sensibilidad Operativa")
+    st.caption(f"Aplicando Inflación: {cagr_inf}% y Crecimiento de Operaciones: {cagr_ops}% sobre el Forecast simulado de cierre de año.")
+    
+    # Escudo protector: verificamos que la tabla no esté vacía por los filtros
+    if len(filtered) > 0:
+        # 1. Calculamos la proyección
+        df_5y = simular_5_anos(filtered, cagr_inf, cagr_ops)
+        
+        # 2. Agrupamos por el contexto para el gráfico
+        resumen_5y = df_5y.groupby("Contexto_Mina")[["Año_0_Base", "Año_1", "Año_2", "Año_3", "Año_4", "Año_5"]].sum().reset_index()
+        
+        # Transformar a formato largo para Plotly
+        resumen_largo = resumen_5y.melt(id_vars="Contexto_Mina", var_name="Año", value_name="Presupuesto Proyectado")
+        
+        # 3. Gráfico de Áreas Apiladas
+        fig_5y = px.area(
+            resumen_largo, 
+            x="Año", 
+            y="Presupuesto Proyectado", 
+            color="Contexto_Mina",
+            title="Evolución Estructural del Presupuesto (5 Años)",
+            markers=True
+        )
+        st.plotly_chart(fig_5y, use_container_width=True)
+        
+        # 4. Tabla resumen financiera
+        st.markdown("**Matriz Financiera de Proyección LRP**")
+        st.dataframe(resumen_5y, use_container_width=True)
 
 # ── Botón de descarga completa ─────────────────────────────────────────────
 excel_completo = to_excel_completo(
