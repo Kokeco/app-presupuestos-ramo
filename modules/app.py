@@ -309,6 +309,31 @@ def aggregate_for_charts(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
         Var_vs_Budget=("Var_vs_Budget", "sum"),
     ).sort_values("Forecast_FY_Modelo", ascending=False)
 
+def simular_5_anos(df_base: pd.DataFrame, inf_anual: float, crec_ops: float) -> pd.DataFrame:
+    """Proyecta 5 años usando el Forecast actual como base y aplicando tasas de crecimiento compuestas."""
+    df_5y = df_base.copy()
+    
+    # Definimos cómo crece cada naturaleza de gasto
+    def obtener_tasa(ctx):
+        # Costos fijos (Labor, Otros) crecen solo con inflación
+        if ctx in ["Labor", "Other"]: 
+            return inf_anual / 100
+        # Costos 100% variables (Combustible, Energía) crecen con inflación + operaciones
+        if ctx in ["Fuel", "Power", "Spare Parts", "Rehandling"]: 
+            return (inf_anual + crec_ops) / 100
+        # Costos mixtos (Mantenimiento, Contratistas) crecen con inflación + la mitad del crecimiento operativo
+        return (inf_anual + (crec_ops * 0.5)) / 100 
+
+    df_5y["Tasa_Crecimiento"] = df_5y["Contexto_Mina"].apply(obtener_tasa)
+
+    # El Año 0 es el Forecast que acabamos de simular para el cierre de este año
+    df_5y["Año_0_Base"] = df_5y["Forecast_FY_Modelo"]
+    
+    # Proyección con interés compuesto
+    for i in range(1, 6):
+        df_5y[f"Año_{i}"] = df_5y[f"Año_{i-1}"] * (1 + df_5y["Tasa_Crecimiento"])
+
+    return df_5y
 
 def to_excel_bytes(df: pd.DataFrame, summary: pd.DataFrame) -> bytes:
     output = io.BytesIO()
@@ -332,7 +357,7 @@ def to_excel_bytes(df: pd.DataFrame, summary: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
-st.title("⛏️ Forecast 5+7 No Lineal Dinámico")
+st.title("👷🏼‍♂️ Forecast 5+7 No Lineal Dinámico")
 st.caption("Aplicación web para presupuesto y gastos mineros: carga Excel, detecta meses, proyecta forecast y genera hallazgos ejecutivos.")
 
 with st.expander("📌 Metodología del modelo", expanded=False):
@@ -442,6 +467,11 @@ with st.sidebar.expander("5) Filtros", expanded=True):
                 if sel:
                     filtered = filtered[filtered[dim].astype(str).isin(sel)]
 
+st.sidebar.subheader("6) Simulación Estratégica (5 Años)")
+st.sidebar.markdown("Define el escenario macroeconómico y operativo:")
+cagr_inf = st.sidebar.slider("Inflación Anual Estimada (%)", 0.0, 10.0, 3.0, 0.5)
+cagr_ops = st.sidebar.slider("Crecimiento Operacional Anual (%)", -5.0, 15.0, 2.0, 0.5)
+
 # KPIs
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 actual_total = filtered["Actual_YTD"].sum()
@@ -456,66 +486,66 @@ kpi4.metric("Var vs Budget", money(var_total), f"{var_pct:.1%}")
 
 st.divider()
 
-# Agrupación para resultados
-chart_dim_options = ["Naturaleza", "Contexto_Mina"] + [c for c in extra_dims if c in filtered.columns]
-chart_dim = st.selectbox("Agrupar dashboard por", chart_dim_options, index=0)
-summary = aggregate_for_charts(filtered, chart_dim)
+# CREACIÓN DE PESTAÑAS PARA LA INTERFAZ
+tab_actual, tab_5y = st.tabs(["📊 Control Año Actual (Forecast vs Budget)", "🚀 Simulación LRP a 5 Años"])
 
-c1, c2 = st.columns(2)
-with c1:
-    fig = px.bar(summary.head(15), x=chart_dim, y=["Budget_FY_Model", "Forecast_FY_Modelo"], barmode="group", title="Forecast FY vs Budget FY")
-    fig.update_layout(xaxis_title="Categoría", yaxis_title="Monto")
-    st.plotly_chart(fig, use_container_width=True)
-with c2:
-    fig2 = px.bar(summary.sort_values("Var_vs_Budget", ascending=False).head(15), x=chart_dim, y="Var_vs_Budget", title="Principales desviaciones vs Budget")
-    fig2.update_layout(xaxis_title="Categoría", yaxis_title="Varianza")
-    st.plotly_chart(fig2, use_container_width=True)
+with tab_actual:
+    # --- AQUÍ VA TU CÓDIGO ORIGINAL DE GRÁFICOS ---
+    chart_dim_options = ["Naturaleza", "Contexto_Mina"] + [c for c in extra_dims if c in filtered.columns]
+    chart_dim = st.selectbox("Agrupar dashboard por", chart_dim_options, index=0)
+    summary = aggregate_for_charts(filtered, chart_dim)
 
-# Curva mensual total
-monthly_rows = []
-for m in MONTH_ORDER:
-    if m in actual_months:
-        monthly_rows.append({"Mes": m, "Tipo": "Actual", "Monto": filtered.get(f"Actual_{m}", pd.Series(0, index=filtered.index)).sum()})
-    elif m in forecast_months:
-        monthly_rows.append({"Mes": m, "Tipo": "Forecast Modelo", "Monto": filtered.get(f"Forecast_{m}", pd.Series(0, index=filtered.index)).sum()})
-    monthly_rows.append({"Mes": m, "Tipo": "Budget", "Monto": filtered.get(f"Budget_{m}", pd.Series(0, index=filtered.index)).sum()})
-monthly_df = pd.DataFrame(monthly_rows)
-fig3 = px.line(monthly_df, x="Mes", y="Monto", color="Tipo", markers=True, title="Serie mensual: Actual + Forecast no lineal vs Budget")
-st.plotly_chart(fig3, use_container_width=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        fig = px.bar(summary.head(15), x=chart_dim, y=["Budget_FY_Model", "Forecast_FY_Modelo"], barmode="group", title="Forecast FY vs Budget FY")
+        fig.update_layout(xaxis_title="Categoría", yaxis_title="Monto ($)")
+        st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        fig2 = px.bar(summary.sort_values("Var_vs_Budget", ascending=False).head(15), x=chart_dim, y="Var_vs_Budget", title="Principales desviaciones vs Budget")
+        fig2.update_layout(xaxis_title="Categoría", yaxis_title="Varianza ($)")
+        st.plotly_chart(fig2, use_container_width=True)
 
-st.subheader("📌 Hallazgos automáticos")
-if len(summary) > 0:
-    top_spend = summary.iloc[0]
-    top_over = summary.sort_values("Var_vs_Budget", ascending=False).iloc[0]
-    top_under = summary.sort_values("Var_vs_Budget", ascending=True).iloc[0]
-    st.markdown(f"""
-    - La mayor concentración de gasto proyectado está en **{top_spend[chart_dim]}**, con un forecast de **{money(top_spend['Forecast_FY_Modelo'])}**.
-    - La mayor desviación positiva contra presupuesto está en **{top_over[chart_dim]}**, con **{money(top_over['Var_vs_Budget'])}** sobre Budget.
-    - La mayor subejecución proyectada está en **{top_under[chart_dim]}**, con **{money(top_under['Var_vs_Budget'])}** respecto al Budget.
-    - El forecast total del filtro seleccionado queda en **{money(forecast_total)}**, equivalente a una desviación de **{var_pct:.1%}** contra el presupuesto anual.
-    """)
+    monthly_rows = []
+    for m in MONTH_ORDER:
+        if m in actual_months:
+            monthly_rows.append({"Mes": m, "Tipo": "Actual", "Monto": filtered.get(f"Actual_{m}", pd.Series(0, index=filtered.index)).sum()})
+        elif m in forecast_months:
+            monthly_rows.append({"Mes": m, "Tipo": "Forecast Modelo", "Monto": filtered.get(f"Forecast_{m}", pd.Series(0, index=filtered.index)).sum()})
+        monthly_rows.append({"Mes": m, "Tipo": "Budget", "Monto": filtered.get(f"Budget_{m}", pd.Series(0, index=filtered.index)).sum()})
+    
+    monthly_df = pd.DataFrame(monthly_rows)
+    fig3 = px.line(monthly_df, x="Mes", y="Monto", color="Tipo", markers=True, title="Serie mensual: Actual + Forecast no lineal vs Budget")
+    st.plotly_chart(fig3, use_container_width=True)
+    
+    st.subheader("📄 Resultado detallado")
+    cols_to_show = [c for c in extra_dims if c in filtered.columns] + ["Naturaleza", "Contexto_Mina", "Actual_YTD", "Budget_YTD", "Budget_Remaining", "Forecast_Remaining", "Budget_FY_Model", "Forecast_FY_Modelo", "Var_vs_Budget", "Var_vs_Budget_%", "Recomendacion"]
+    cols_to_show = list(dict.fromkeys([c for c in cols_to_show if c in filtered.columns]))
+    st.dataframe(filtered[cols_to_show].sort_values("Var_vs_Budget", ascending=False), use_container_width=True, height=300)
 
-st.subheader("✅ Propuesta formal de mejora")
-st.markdown(
-    """
-    Se recomienda implementar un sistema de control presupuestario con alertas tempranas por naturaleza de gasto y centro de costo.
-    Las partidas con desviaciones positivas deben revisarse mediante acciones de control operacional, renegociación contractual,
-    ajuste de planificación de mantenciones y revisión de consumos críticos. Para partidas con subejecución, se recomienda evaluar
-    si corresponde a eficiencia real, retraso operacional o reprogramación presupuestaria.
-    """
-)
-
-st.subheader("📄 Resultado detallado")
-cols_to_show = [c for c in extra_dims if c in filtered.columns] + ["Naturaleza", "Contexto_Mina", "Actual_YTD", "Budget_YTD", "Budget_Remaining", "Forecast_Remaining", "Budget_FY_Model", "Forecast_FY_Modelo", "Var_vs_Budget", "Var_vs_Budget_%", "Recomendacion", "Justificacion_Mina"]
-cols_to_show = list(dict.fromkeys([c for c in cols_to_show if c in filtered.columns]))
-st.dataframe(filtered[cols_to_show].sort_values("Var_vs_Budget", ascending=False), use_container_width=True, height=420)
-
-excel_bytes = to_excel_bytes(filtered[cols_to_show], summary)
-st.download_button(
-    "⬇️ Descargar Forecast en Excel",
-    data=excel_bytes,
-    file_name="forecast_5mas7_no_lineal_resultados.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
-
-st.caption("Modelo diseñado para defensa académica: no usa promedio lineal simple; combina ejecución acumulada, tendencia reciente, curva no lineal y contexto minero.")
+with tab_5y:
+    st.subheader("Simulación a 5 Años basada en Sensibilidad Operativa")
+    st.caption(f"Aplicando Inflación: {cagr_inf}% y Crecimiento de Operaciones: {cagr_ops}% sobre el Forecast simulado de cierre de año.")
+    
+    # 1. Calculamos la proyección
+    df_5y = simular_5_anos(filtered, cagr_inf, cagr_ops)
+    
+    # 2. Agrupamos por el contexto (Labor, Fuel, etc.) para el gráfico
+    resumen_5y = df_5y.groupby("Contexto_Mina")[["Año_0_Base", "Año_1", "Año_2", "Año_3", "Año_4", "Año_5"]].sum().reset_index()
+    
+    # Transformar a formato largo para que Plotly lo grafique fácilmente
+    resumen_largo = resumen_5y.melt(id_vars="Contexto_Mina", var_name="Año", value_name="Presupuesto Proyectado")
+    
+    # 3. Gráfico de Áreas Apiladas (Excelente para mostrar crecimiento a largo plazo)
+    fig_5y = px.area(
+        resumen_largo, 
+        x="Año", 
+        y="Presupuesto Proyectado", 
+        color="Contexto_Mina",
+        title="Evolución Estructural del Presupuesto (5 Años)",
+        markers=True
+    )
+    st.plotly_chart(fig_5y, use_container_width=True)
+    
+    # 4. Tabla resumen financiera
+    st.markdown("**Matriz Financiera de Proyección LRP**")
+    st.dataframe(resumen_5y, use_container_width=True)
