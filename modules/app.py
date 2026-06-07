@@ -17,7 +17,7 @@ import streamlit as st
 
 st.set_page_config(
     page_title="Forecast 5+7 No Lineal Dinámico",
-    page_icon="⛏️",
+    page_icon="👷🏼‍♂️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
