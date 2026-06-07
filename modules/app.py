@@ -332,28 +332,24 @@ def simular_5_anos(df_base: pd.DataFrame, inf_anual: float, crec_ops: float) -> 
     return df_5y
 
 def simular_5_anos(df_base: pd.DataFrame, inf_anual: float, crec_ops: float) -> pd.DataFrame:
-    """Proyecta 5 años usando el Forecast actual como base y aplicando tasas de crecimiento compuestas."""
     df_5y = df_base.copy()
     
-    # Definimos cómo crece cada naturaleza de gasto
     def obtener_tasa(ctx):
-        # Costos fijos (Labor, Otros) crecen solo con inflación
         if ctx in ["Labor", "Other"]: 
             return inf_anual / 100
-        # Costos 100% variables (Combustible, Energía) crecen con inflación + operaciones
         if ctx in ["Fuel", "Power", "Spare Parts", "Rehandling"]: 
             return (inf_anual + crec_ops) / 100
-        # Costos mixtos (Mantenimiento, Contratistas) crecen con inflación + la mitad del crecimiento operativo
         return (inf_anual + (crec_ops * 0.5)) / 100 
 
     df_5y["Tasa_Crecimiento"] = df_5y["Contexto_Mina"].apply(obtener_tasa)
-
-    # El Año 0 es el Forecast que acabamos de simular para el cierre de este año
     df_5y["Año_0_Base"] = df_5y["Forecast_FY_Modelo"]
     
-    # Proyección con interés compuesto
+    # ✅ Fix: prev_col evita buscar "Año_0" que no existe
+    prev_col = "Año_0_Base"
     for i in range(1, 6):
-        df_5y[f"Año_{i}"] = df_5y[f"Año_{i-1}"] * (1 + df_5y["Tasa_Crecimiento"])
+        new_col = f"Año_{i}"
+        df_5y[new_col] = df_5y[prev_col] * (1 + df_5y["Tasa_Crecimiento"])
+        prev_col = new_col
 
     return df_5y
 
