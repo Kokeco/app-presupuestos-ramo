@@ -9,7 +9,7 @@ st.set_page_config(page_title="App Control de Presupuestos", layout="wide")
 st.title("📊 Panel Interactivo de Presupuestos y Forecast")
 st.markdown("Herramienta de control de gestión para simulación de escenarios.")
 
-ruta_archivo = "data/ Budget_2026.csv"
+ruta_archivo = "modules/data/ Budget_2026.csv"
 df_budget = cargar_datos_budget(ruta_archivo)
 
 # Solo ejecutamos la lógica visual si la data se cargó y procesó correctamente
