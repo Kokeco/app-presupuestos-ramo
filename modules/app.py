@@ -687,23 +687,21 @@ with tab_5y:
         )
         st.plotly_chart(fig_5y, use_container_width=True)
         
-        # 4. Tabla resumen financiera
+       # 4. Tabla resumen financiera
         st.markdown("**Matriz Financiera de Proyección LRP**")
         st.dataframe(resumen_5y, use_container_width=True)
 
-# ── Botón de descarga completa ─────────────────────────────────────────────
-excel_completo = to_excel_completo(
-    filtered, summary, resumen_5y, resumen_largo, actual_months, forecast_months
-)
+        # ── Botón de descarga completa ────────────────────────────────────
+        excel_completo = to_excel_completo(
+            filtered, summary, resumen_5y, resumen_largo, actual_months, forecast_months
+        )
+        st.download_button(
+            label="⬇️ Descargar Reporte Completo: Forecast 5+7 + Simulación LRP (Excel)",
+            data=excel_completo,
+            file_name="reporte_forecast_lrp.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 
-st.download_button(
-    label="⬇️ Descargar Reporte Completo: Forecast 5+7 + Simulación LRP (Excel)",
-    data=excel_completo,
-    file_name="reporte_forecast_lrp.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True,
-)
-    
     else:
-        # Mensaje amigable si la tabla está vacía
         st.warning("⚠️ No hay datos para simular. Por favor ajusta los filtros en el menú lateral izquierdo para cargar información.")
