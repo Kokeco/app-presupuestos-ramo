@@ -2,23 +2,23 @@ import pandas as pd
 
 def calcular_forecast(df_base, var_combustible, var_tasa_cambio, var_labor):
     """
-    Recibe el DataFrame base y aplica las variaciones porcentuales del usuario.
+    Toma la base de datos limpia y aplica variaciones porcentuales de forma segura.
     """
     df_forecast = df_base.copy()
     
-    # 1. Aplicar variación al Combustible (Fuel)
-    filtro_fuel = df_forecast['Classif'] == 'Fuel'
-    df_forecast.loc[filtro_fuel, 'Monto'] = df_forecast.loc[filtro_fuel, 'Monto'] * (1 + (var_combustible / 100))
+    # Pasamos temporalmente a minúsculas para asegurar que el filtro funcione siempre
+    classif_lower = df_forecast['Classif'].str.lower()
     
-    # 2. Aplicar Tasa de Cambio (Afecta a Expenses y Contractors)
-    filtro_tasa = df_forecast['Classif'].isin(['Expenses', 'Contractors'])
-    df_forecast.loc[filtro_tasa, 'Monto'] = df_forecast.loc[filtro_tasa, 'Monto'] * (1 + (var_tasa_cambio / 100))
+    # 1. Ajuste al Combustible (Fuel)
+    df_forecast.loc[classif_lower == 'fuel', 'Monto'] *= (1 + (var_combustible / 100))
     
-    # 3. Aplicar variación a Mano de Obra (Labor)
-    filtro_labor = df_forecast['Classif'] == 'Labor'
-    df_forecast.loc[filtro_labor, 'Monto'] = df_forecast.loc[filtro_labor, 'Monto'] * (1 + (var_labor / 100))
+    # 2. Ajuste por Tasa de Cambio (Expenses y Contractors)
+    filtro_tasa = classif_lower.isin(['expenses', 'contractors'])
+    df_forecast.loc[filtro_tasa, 'Monto'] *= (1 + (var_tasa_cambio / 100))
     
-    # Cambiamos la etiqueta para diferenciarlo en los gráficos
+    # 3. Ajuste al Costo Laboral (Labor)
+    df_forecast.loc[classif_lower == 'labor', 'Monto'] *= (1 + (var_labor / 100))
+    
     df_forecast['Escenario'] = '2. Forecast Proyectado'
     
     return df_forecast
