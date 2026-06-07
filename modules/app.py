@@ -311,18 +311,17 @@ def aggregate_for_charts(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
 
 def simular_5_anos(df_base: pd.DataFrame, inf_anual: float, crec_ops: float) -> pd.DataFrame:
     df_5y = df_base.copy()
-    
+
     def obtener_tasa(ctx):
-        if ctx in ["Labor", "Other"]: 
+        if ctx in ["Labor", "Other"]:
             return inf_anual / 100
-        if ctx in ["Fuel", "Power", "Spare Parts", "Rehandling"]: 
+        if ctx in ["Fuel", "Power", "Spare Parts", "Rehandling"]:
             return (inf_anual + crec_ops) / 100
-        return (inf_anual + (crec_ops * 0.5)) / 100 
+        return (inf_anual + (crec_ops * 0.5)) / 100
 
     df_5y["Tasa_Crecimiento"] = df_5y["Contexto_Mina"].apply(obtener_tasa)
     df_5y["Año_0_Base"] = df_5y["Forecast_FY_Modelo"]
-    
-    # ✅ Fix: usar Año_0_Base como punto de partida explícito
+
     prev_col = "Año_0_Base"
     for i in range(1, 6):
         new_col = f"Año_{i}"
@@ -660,34 +659,64 @@ def to_excel_completo(
 with tab_5y:
     st.subheader("Simulación a 5 Años basada en Sensibilidad Operativa")
     st.caption(f"Aplicando Inflación: {cagr_inf}% y Crecimiento de Operaciones: {cagr_ops}% sobre el Forecast simulado de cierre de año.")
-    
-    # Escudo protector: verificamos que la tabla no esté vacía por los filtros
+
     if len(filtered) > 0:
-        # 1. Calculamos la proyección
+        import datetime
+        año_base = datetime.datetime.now().year
+
         df_5y = simular_5_anos(filtered, cagr_inf, cagr_ops)
-        
-        # 2. Agrupamos por el contexto para el gráfico
-        resumen_5y = df_5y.groupby("Contexto_Mina")[["Año_0_Base", "Año_1", "Año_2", "Año_3", "Año_4", "Año_5"]].sum().reset_index()
-        
-        # Transformar a formato largo para Plotly
-        resumen_largo = resumen_5y.melt(id_vars="Contexto_Mina", var_name="Año", value_name="Presupuesto Proyectado")
-        
-        # 3. Gráfico de Áreas Apiladas
+
+        # ── Tabla estilo FY24/FY25/FY26... ───────────────────────────────
+        cols_agrup = ["Contexto_Mina"]
+        if "Naturaleza" in df_5y.columns:
+            cols_agrup = ["Contexto_Mina", "Naturaleza"]
+
+        año_cols = ["Año_0_Base", "Año_1", "Año_2", "Año_3", "Año_4", "Año_5"]
+        resumen_5y_raw = df_5y.groupby(cols_agrup)[año_cols].sum().reset_index()
+
+        # Renombrar columnas a FY25, FY26, etc.
+        rename_map = {f"Año_{i}_Base" if i == 0 else f"Año_{i}": f"FY{str(año_base + i)[2:]}" for i in range(6)}
+        rename_map["Año_0_Base"] = f"FY{str(año_base)[2:]}"
+        resumen_5y = resumen_5y_raw.rename(columns=rename_map)
+
+        fy_cols = [f"FY{str(año_base + i)[2:]}" for i in range(6)]
+
+        # Fila de TOTAL
+        total_row = {col: resumen_5y[col].sum() if col in fy_cols else "TOTAL" for col in resumen_5y.columns}
+        if len(cols_agrup) > 1:
+            total_row[cols_agrup[1]] = ""
+        resumen_5y_con_total = pd.concat([resumen_5y, pd.DataFrame([total_row])], ignore_index=True)
+
+        # Formatear montos como US$ MM
+        def fmt_mm(val):
+            try:
+                v = float(val)
+                return f"US$ {v/1_000_000:,.2f} MM"
+            except Exception:
+                return val
+
+        resumen_display = resumen_5y_con_total.copy()
+        for col in fy_cols:
+            resumen_display[col] = resumen_display[col].apply(fmt_mm)
+
+        st.markdown("**Proyección LRP — Formato FY (millones USD)**")
+        st.dataframe(resumen_display, use_container_width=True, hide_index=True)
+
+        # ── Gráfico de áreas ──────────────────────────────────────────────
+        resumen_largo = resumen_5y.melt(
+            id_vars=cols_agrup, var_name="Año", value_name="Presupuesto Proyectado"
+        )
         fig_5y = px.area(
-            resumen_largo, 
-            x="Año", 
-            y="Presupuesto Proyectado", 
+            resumen_largo,
+            x="Año",
+            y="Presupuesto Proyectado",
             color="Contexto_Mina",
             title="Evolución Estructural del Presupuesto (5 Años)",
-            markers=True
+            markers=True,
         )
         st.plotly_chart(fig_5y, use_container_width=True)
-        
-       # 4. Tabla resumen financiera
-        st.markdown("**Matriz Financiera de Proyección LRP**")
-        st.dataframe(resumen_5y, use_container_width=True)
 
-        # ── Botón de descarga completa ────────────────────────────────────
+        # ── Botón descarga ────────────────────────────────────────────────
         excel_completo = to_excel_completo(
             filtered, summary, resumen_5y, resumen_largo, actual_months, forecast_months
         )
