@@ -310,6 +310,28 @@ def aggregate_for_charts(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     ).sort_values("Forecast_FY_Modelo", ascending=False)
 
 def simular_5_anos(df_base: pd.DataFrame, inf_anual: float, crec_ops: float) -> pd.DataFrame:
+    df_5y = df_base.copy()
+    
+    def obtener_tasa(ctx):
+        if ctx in ["Labor", "Other"]: 
+            return inf_anual / 100
+        if ctx in ["Fuel", "Power", "Spare Parts", "Rehandling"]: 
+            return (inf_anual + crec_ops) / 100
+        return (inf_anual + (crec_ops * 0.5)) / 100 
+
+    df_5y["Tasa_Crecimiento"] = df_5y["Contexto_Mina"].apply(obtener_tasa)
+    df_5y["Año_0_Base"] = df_5y["Forecast_FY_Modelo"]
+    
+    # ✅ Fix: usar Año_0_Base como punto de partida explícito
+    prev_col = "Año_0_Base"
+    for i in range(1, 6):
+        new_col = f"Año_{i}"
+        df_5y[new_col] = df_5y[prev_col] * (1 + df_5y["Tasa_Crecimiento"])
+        prev_col = new_col
+
+    return df_5y
+
+def simular_5_anos(df_base: pd.DataFrame, inf_anual: float, crec_ops: float) -> pd.DataFrame:
     """Proyecta 5 años usando el Forecast actual como base y aplicando tasas de crecimiento compuestas."""
     df_5y = df_base.copy()
     
@@ -551,6 +573,138 @@ with tab_5y:
         # 4. Tabla resumen financiera
         st.markdown("**Matriz Financiera de Proyección LRP**")
         st.dataframe(resumen_5y, use_container_width=True)
+
+def to_excel_completo(
+    df_forecast: pd.DataFrame,
+    summary_forecast: pd.DataFrame,
+    resumen_5y: pd.DataFrame,
+    resumen_largo: pd.DataFrame,
+    actual_months: list,
+    forecast_months: list,
+) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        wb = writer.book
+
+        # Formatos
+        money_fmt  = wb.add_format({"num_format": '#,##0;[Red]-#,##0'})
+        pct_fmt    = wb.add_format({"num_format": '0.0%'})
+        header_fmt = wb.add_format({"bold": True, "bg_color": "#D9EAF7", "border": 1})
+        green_fmt  = wb.add_format({"bold": True, "bg_color": "#C6EFCE", "border": 1})
+        red_fmt    = wb.add_format({"bold": True, "bg_color": "#FFC7CE", "border": 1})
+
+        def write_sheet(df, sheet_name, money_keys=(), pct_keys=()):
+            df.to_excel(writer, index=False, sheet_name=sheet_name)
+            ws = writer.sheets[sheet_name]
+            for c, col in enumerate(df.columns):
+                ws.write(0, c, col, header_fmt)
+                width = min(max(len(str(col)) + 2, 14), 38)
+                if any(k in str(col).lower() for k in pct_keys):
+                    ws.set_column(c, c, width, pct_fmt)
+                elif any(k in str(col).lower() for k in money_keys):
+                    ws.set_column(c, c, width, money_fmt)
+                else:
+                    ws.set_column(c, c, width)
+
+        # ── Hoja 1: Resumen Forecast 5+7 ──────────────────────────────────
+        write_sheet(
+            summary_forecast,
+            "Resumen_Forecast",
+            money_keys=["actual", "budget", "forecast", "var"],
+            pct_keys=["%"],
+        )
+
+        # ── Hoja 2: Detalle Forecast fila a fila ──────────────────────────
+        cols_detalle = (
+            ["Naturaleza", "Contexto_Mina"]
+            + [f"Actual_{m}"   for m in actual_months   if f"Actual_{m}"   in df_forecast.columns]
+            + [f"Budget_{m}"   for m in actual_months   if f"Budget_{m}"   in df_forecast.columns]
+            + [f"Forecast_{m}" for m in forecast_months if f"Forecast_{m}" in df_forecast.columns]
+            + ["Actual_YTD", "Budget_FY_Model", "Forecast_FY_Modelo",
+               "Var_vs_Budget", "Var_vs_Budget_%", "Recomendacion"]
+        )
+        cols_detalle = list(dict.fromkeys([c for c in cols_detalle if c in df_forecast.columns]))
+        write_sheet(
+            df_forecast[cols_detalle],
+            "Detalle_Forecast",
+            money_keys=["actual", "budget", "forecast", "var", "prom"],
+            pct_keys=["%"],
+        )
+
+        # Colorear columna Var_vs_Budget_% en Detalle_Forecast
+        ws2 = writer.sheets["Detalle_Forecast"]
+        if "Var_vs_Budget_%" in cols_detalle:
+            col_idx = cols_detalle.index("Var_vs_Budget_%")
+            for row_idx, val in enumerate(df_forecast["Var_vs_Budget_%"], start=1):
+                try:
+                    v = float(val)
+                    fmt = red_fmt if v > 0.10 else (green_fmt if v < -0.10 else pct_fmt)
+                except Exception:
+                    fmt = pct_fmt
+                ws2.write(row_idx, col_idx, val, fmt)
+
+        # ── Hoja 3: Simulación LRP 5 Años (matriz) ────────────────────────
+        write_sheet(
+            resumen_5y,
+            "Simulacion_5_Anos",
+            money_keys=["año", "base"],
+        )
+
+        # ── Hoja 4: Simulación LRP detalle largo (para pivots) ────────────
+        write_sheet(
+            resumen_largo,
+            "LRP_Detalle_Largo",
+            money_keys=["presupuesto"],
+        )
+
+        # ── Hoja 5: Parámetros del modelo ─────────────────────────────────
+        params_data = {
+            "Parámetro": [
+                "Último mes real (YTD)",
+                "Meses reales",
+                "Meses forecast",
+                "Sensibilidad ejecución YTD",
+                "Peso tendencia reciente",
+                "Intensidad curva no lineal",
+                "Forma curva logística",
+                "Inflación anual estimada (%)",
+                "Crecimiento operacional anual (%)",
+            ],
+            "Valor": [
+                cutoff_month,
+                ", ".join(actual_months),
+                ", ".join(forecast_months),
+                sensitivity_mult,
+                momentum_mult,
+                scenario_mult,
+                steepness,
+                cagr_inf,
+                cagr_ops,
+            ],
+        }
+        pd.DataFrame(params_data).to_excel(writer, index=False, sheet_name="Parametros_Modelo")
+        ws5 = writer.sheets["Parametros_Modelo"]
+        ws5.set_column(0, 0, 35)
+        ws5.set_column(1, 1, 45)
+        for c, col in enumerate(["Parámetro", "Valor"]):
+            ws5.write(0, c, col, header_fmt)
+
+    return output.getvalue()
+
+
+# ── Botón de descarga completa ─────────────────────────────────────────────
+excel_completo = to_excel_completo(
+    filtered, summary, resumen_5y, resumen_largo, actual_months, forecast_months
+)
+
+st.download_button(
+    label="⬇️ Descargar Reporte Completo: Forecast 5+7 + Simulación LRP (Excel)",
+    data=excel_completo,
+    file_name="reporte_forecast_lrp.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True,
+)
+    
     else:
         # Mensaje amigable si la tabla está vacía
         st.warning("⚠️ No hay datos para simular. Por favor ajusta los filtros en el menú lateral izquierdo para cargar información.")
