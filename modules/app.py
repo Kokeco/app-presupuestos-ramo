@@ -12,7 +12,7 @@ st.markdown("Herramienta de control de gestión para simulación de escenarios."
 
 # 1. Cargar Datos
 # ¡IMPORTANTE! Cambia el nombre del archivo al nombre exacto del CSV que subiste a la carpeta data
-ruta_archivo = "data/Datos Proyecto Mejora  2026.xlsx - BUDGET 2026 - 2030.csv"
+ruta_archivo = "data/2026 - 2030.csv"
 df_budget = cargar_datos_budget(ruta_archivo)
 
 if df_budget is not None:
