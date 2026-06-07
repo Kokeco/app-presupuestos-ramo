@@ -4,33 +4,25 @@ import plotly.express as px
 from modules.data_loader import cargar_datos_budget
 from modules.forecast import calcular_forecast
 
-# Configuración de la página
 st.set_page_config(page_title="App Control de Presupuestos", layout="wide")
 
 st.title("📊 Panel Interactivo de Presupuestos y Forecast")
 st.markdown("Herramienta de control de gestión para simulación de escenarios.")
 
-# 1. Cargar Datos
-# ¡IMPORTANTE! Cambia el nombre del archivo al nombre exacto del CSV que subiste a la carpeta data
 ruta_archivo = "data/2026 - 2030.csv"
 df_budget = cargar_datos_budget(ruta_archivo)
 
-if df_budget is not None:
-    # 2. Panel Lateral de Controles (What-If)
+# Solo ejecutamos la lógica visual si la data se cargó y procesó correctamente
+if df_budget is not None and not df_budget.empty:
     st.sidebar.header("⚙️ Ajustes de Escenario")
-    st.sidebar.markdown("Modifica las variables operativas:")
     
     var_combustible = st.sidebar.slider("Variación Consumo Combustible (%)", -20.0, 20.0, 5.0, 1.0)
     var_tasa_cambio = st.sidebar.slider("Variación Tasa de Cambio (%)", -15.0, 15.0, 3.0, 0.5)
     var_labor = st.sidebar.slider("Ajuste Costo Laboral (%)", -10.0, 10.0, 0.0, 1.0)
     
-    # 3. Calcular Forecast
     df_forecast = calcular_forecast(df_budget, var_combustible, var_tasa_cambio, var_labor)
-    
-    # Unir ambos dataframes para comparar
     df_consolidado = pd.concat([df_budget, df_forecast])
     
-    # 4. Métricas Principales (KPIs)
     total_budget = df_budget['Monto'].sum()
     total_forecast = df_forecast['Monto'].sum()
     diferencia = total_forecast - total_budget
@@ -42,13 +34,9 @@ if df_budget is not None:
     
     st.markdown("---")
     
-    # 5. Gráficos Interactivos con Plotly
     st.subheader("Análisis Visual: Budget vs Forecast")
-    
-    # Agrupamos los datos por Clasificación (Fuel, Labor, etc.) y Escenario
     resumen_grafico = df_consolidado.groupby(['Classif', 'Escenario'])['Monto'].sum().reset_index()
     
-    # Crear gráfico de barras agrupadas
     fig = px.bar(
         resumen_grafico, 
         x='Classif', 
@@ -62,8 +50,7 @@ if df_budget is not None:
     
     st.plotly_chart(fig, use_container_width=True)
     
-    # 6. Vista de Datos Detallados
     with st.expander("Ver Base de Datos Transformada"):
         st.dataframe(df_forecast.head(100))
 else:
-    st.warning("⚠️ Esperando el archivo de datos. Por favor sube el archivo a la carpeta 'data/'.")
+    st.warning("⚠️ No se pudo procesar el archivo. Revisa que esté correctamente cargado en la carpeta 'data/'.")
