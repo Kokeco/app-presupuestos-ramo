@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from modules.data_loader import cargar_datos_budget
-from modules.forecast import calcular_forecast
+from data_loader import cargar_datos_budget
+from forecast import calcular_forecast
 
 st.set_page_config(page_title="App Control de Presupuestos", layout="wide")
 
