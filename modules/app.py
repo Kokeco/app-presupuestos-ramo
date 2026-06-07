@@ -526,18 +526,18 @@ with tab_5y:
     st.subheader("Simulación a 5 Años basada en Sensibilidad Operativa")
     st.caption(f"Aplicando Inflación: {cagr_inf}% y Crecimiento de Operaciones: {cagr_ops}% sobre el Forecast simulado de cierre de año.")
     
-    # Control de seguridad: verificamos que la tabla no esté vacía por los filtros
+    # Escudo protector: verificamos que la tabla no esté vacía por los filtros
     if len(filtered) > 0:
         # 1. Calculamos la proyección
         df_5y = simular_5_anos(filtered, cagr_inf, cagr_ops)
         
-        # 2. Agrupamos por el contexto (Labor, Fuel, etc.) para el gráfico
+        # 2. Agrupamos por el contexto para el gráfico
         resumen_5y = df_5y.groupby("Contexto_Mina")[["Año_0_Base", "Año_1", "Año_2", "Año_3", "Año_4", "Año_5"]].sum().reset_index()
         
-        # Transformar a formato largo para que Plotly lo grafique fácilmente
+        # Transformar a formato largo para Plotly
         resumen_largo = resumen_5y.melt(id_vars="Contexto_Mina", var_name="Año", value_name="Presupuesto Proyectado")
         
-        # 3. Gráfico de Áreas Apiladas (Excelente para mostrar crecimiento a largo plazo)
+        # 3. Gráfico de Áreas Apiladas
         fig_5y = px.area(
             resumen_largo, 
             x="Año", 
@@ -552,5 +552,5 @@ with tab_5y:
         st.markdown("**Matriz Financiera de Proyección LRP**")
         st.dataframe(resumen_5y, use_container_width=True)
     else:
-        # Mensaje amigable si los filtros dejan la data en cero
+        # Mensaje amigable si la tabla está vacía
         st.warning("⚠️ No hay datos para simular. Por favor ajusta los filtros en el menú lateral izquierdo para cargar información.")
