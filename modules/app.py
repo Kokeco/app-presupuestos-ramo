@@ -351,7 +351,33 @@ def simular_5_anos(df_base: pd.DataFrame, inf_anual: float, crec_ops: float) -> 
         prev_col = new_col
 
     return df_5y
+def calcular_estacionalidad_mensual(df: pd.DataFrame, actual_months: List[str], forecast_months: List[str]) -> Dict[str, float]:
+    """Calcula el % que representa cada mes del año actual (Actual + Forecast) sobre el total FY.
+    Se usa como patrón de estacionalidad para repartir el Año_1 de la simulación en 12 meses."""
+    total_fy = 0.0
+    montos_mes = {}
+    for m in MONTH_ORDER:
+        if m in actual_months:
+            col = f"Actual_{m}"
+        elif m in forecast_months:
+            col = f"Forecast_{m}"
+        else:
+            col = None
+        monto = float(df[col].sum()) if col and col in df.columns else 0.0
+        montos_mes[m] = monto
+        total_fy += monto
 
+    if total_fy <= 1e-9:
+        # Fallback: distribución lineal si no hay datos
+        return {m: 1 / 12 for m in MONTH_ORDER}
+
+    return {m: montos_mes[m] / total_fy for m in MONTH_ORDER}
+
+
+def desglosar_año1_en_meses(total_año1: float, estacionalidad: Dict[str, float]) -> Dict[str, float]:
+    """Reparte un total anual en 12 meses usando el patrón de estacionalidad dado."""
+    return {m: total_año1 * estacionalidad.get(m, 1 / 12) for m in MONTH_ORDER}
+    
 def to_excel_bytes(df: pd.DataFrame, summary: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -666,7 +692,6 @@ with tab_5y:
 
         df_5y = simular_5_anos(filtered, cagr_inf, cagr_ops)
 
-        # ── Tabla estilo FY24/FY25/FY26... ───────────────────────────────
         cols_agrup = ["Contexto_Mina"]
         if "Naturaleza" in df_5y.columns:
             cols_agrup = ["Contexto_Mina", "Naturaleza"]
@@ -674,20 +699,37 @@ with tab_5y:
         año_cols = ["Año_0_Base", "Año_1", "Año_2", "Año_3", "Año_4", "Año_5"]
         resumen_5y_raw = df_5y.groupby(cols_agrup)[año_cols].sum().reset_index()
 
-        # Renombrar columnas a FY25, FY26, etc.
-        rename_map = {f"Año_{i}_Base" if i == 0 else f"Año_{i}": f"FY{str(año_base + i)[2:]}" for i in range(6)}
-        rename_map["Año_0_Base"] = f"FY{str(año_base)[2:]}"
+        # ── Estacionalidad para desglosar Año_1 (2027) en 12 meses ─────────
+        estacionalidad = calcular_estacionalidad_mensual(filtered, actual_months, forecast_months)
+
+        año1_label = año_base + 1  # 2027
+        meses_año1 = [f"{m}-{str(año1_label)[2:]}" for m in MONTH_ORDER]
+
+        for m, mes_col in zip(MONTH_ORDER, meses_año1):
+            resumen_5y_raw[mes_col] = resumen_5y_raw["Año_1"] * estacionalidad[m]
+
+        # Renombrar años restantes a FY28, FY29, FY30, FY31
+        rename_map = {
+            "Año_0_Base": f"FY{str(año_base)[2:]}",
+            "Año_2": f"FY{str(año_base + 2)[2:]}",
+            "Año_3": f"FY{str(año_base + 3)[2:]}",
+            "Año_4": f"FY{str(año_base + 4)[2:]}",
+            "Año_5": f"FY{str(año_base + 5)[2:]}",
+        }
         resumen_5y = resumen_5y_raw.rename(columns=rename_map)
+        resumen_5y = resumen_5y.drop(columns=["Año_1"])
 
-        fy_cols = [f"FY{str(año_base + i)[2:]}" for i in range(6)]
+        fy_acumulados = [f"FY{str(año_base + i)[2:]}" for i in [0, 2, 3, 4, 5]]
+        cols_orden = cols_agrup + [f"FY{str(año_base)[2:]}"] + meses_año1 + fy_acumulados[1:]
+        resumen_5y = resumen_5y[[c for c in cols_orden if c in resumen_5y.columns]]
 
-        # Fila de TOTAL
-        total_row = {col: resumen_5y[col].sum() if col in fy_cols else "TOTAL" for col in resumen_5y.columns}
+        # Fila TOTAL
+        cols_money = [c for c in resumen_5y.columns if c not in cols_agrup]
+        total_row = {col: resumen_5y[col].sum() if col in cols_money else "TOTAL" for col in resumen_5y.columns}
         if len(cols_agrup) > 1:
             total_row[cols_agrup[1]] = ""
         resumen_5y_con_total = pd.concat([resumen_5y, pd.DataFrame([total_row])], ignore_index=True)
 
-        # Formatear montos como US$ MM
         def fmt_mm(val):
             try:
                 v = float(val)
@@ -696,14 +738,24 @@ with tab_5y:
                 return val
 
         resumen_display = resumen_5y_con_total.copy()
-        for col in fy_cols:
+        for col in cols_money:
             resumen_display[col] = resumen_display[col].apply(fmt_mm)
 
-        st.markdown("**Proyección LRP — Formato FY (millones USD)**")
+        st.markdown(f"**Proyección LRP — {año1_label} mensual + acumulados anuales (millones USD)**")
         st.dataframe(resumen_display, use_container_width=True, hide_index=True)
 
-        # ── Gráfico de áreas ──────────────────────────────────────────────
-        resumen_largo = resumen_5y.melt(
+        # ── Gráfico de áreas (con años acumulados, no desglose mensual) ────
+        año_cols_grafico = [f"FY{str(año_base)[2:]}"] + [f"FY{str(año_base+i)[2:]}" for i in range(1, 6)]
+        resumen_grafico = df_5y.groupby(cols_agrup)[año_cols].sum().reset_index()
+        resumen_grafico_renombrado = resumen_grafico.rename(columns={
+            "Año_0_Base": año_cols_grafico[0],
+            "Año_1": año_cols_grafico[1],
+            "Año_2": año_cols_grafico[2],
+            "Año_3": año_cols_grafico[3],
+            "Año_4": año_cols_grafico[4],
+            "Año_5": año_cols_grafico[5],
+        })
+        resumen_largo = resumen_grafico_renombrado.melt(
             id_vars=cols_agrup, var_name="Año", value_name="Presupuesto Proyectado"
         )
         fig_5y = px.area(
