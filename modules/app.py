@@ -6,11 +6,7 @@ from __future__ import annotations
 
 import datetime
 import io
-import json
-import os
 import re
-import subprocess
-import tempfile
 import unicodedata
 from typing import Dict, List, Optional, Tuple
 
@@ -21,16 +17,27 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # ReportLab para PDF
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter, A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch, cm
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, HRFlowable, KeepTogether
-)
-from reportlab.platypus.flowables import HRFlowable
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch, cm
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        PageBreak, HRFlowable, KeepTogether
+    )
+    from reportlab.platypus.flowables import HRFlowable
+    REPORTLAB_OK = True
+except ImportError:
+    REPORTLAB_OK = False
+
+# python-docx para Word
+try:
+    import docx as _docx_module
+    PYTHON_DOCX_OK = True
+except ImportError:
+    PYTHON_DOCX_OK = False
 
 st.set_page_config(
     page_title="Forecast 5+7 No Lineal Dinámico",
@@ -1058,7 +1065,21 @@ def generar_docx_informe(
     resumen_5y: pd.DataFrame,
     registro: List[dict],
 ) -> bytes:
-    """Genera informe ejecutivo en DOCX via Node.js docx."""
+    """Genera informe ejecutivo en DOCX usando python-docx (sin Node.js)."""
+    from docx import Document
+    from docx.shared import Pt, RGBColor, Cm, Inches
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_ALIGN_VERTICAL
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    BLUE_DARK  = RGBColor(0x1F, 0x4E, 0x79)
+    BLUE_MID   = RGBColor(0x2E, 0x75, 0xB6)
+    BLUE_LIGHT = "D9EAF7"
+    GRAY_BG    = "F2F2F2"
+    RED_COLOR  = RGBColor(0xC0, 0x00, 0x00)
+    GREEN_COLOR = RGBColor(0x37, 0x56, 0x23)
+    WHITE      = RGBColor(0xFF, 0xFF, 0xFF)
 
     T = {
         "es": {
@@ -1075,19 +1096,22 @@ def generar_docx_informe(
             "sec_sens": "6. Registro de Sensibilidades",
             "col_cat": "Categoría", "col_actual": "Actual YTD", "col_budget": "Budget FY",
             "col_forecast": "Forecast FY", "col_var": "Var vs Budget",
+            "param_label": "Parámetro", "value_label": "Valor",
             "param_cutoff": "Último mes real", "param_actual": "Meses reales",
             "param_forecast": "Meses forecast", "param_sens": "Sensibilidad ejecución",
-            "param_mom": "Peso tendencia", "param_inf": "Inflación anual", "param_ops": "Crec. operacional",
+            "param_mom": "Peso tendencia", "param_inf": "Inflación anual",
+            "param_ops": "Crec. operacional",
             "kpi_actual": "Actual YTD", "kpi_budget": "Budget FY",
             "kpi_forecast": "Forecast FY Modelo", "kpi_var": "Variación vs Budget",
             "hallazgo_1": f"El Forecast FY Modelo proyecta {money(forecast_total)}, con desviación {var_pct:+.1%} vs Budget FY de {money(budget_total)}.",
-            "hallazgo_2": "Las categorías con mayor peso presupuestario concentran las principales desviaciones.",
-            "hallazgo_3": f"LRP 5 años con inflación {cagr_inf}% y crecimiento operacional {cagr_ops}%.",
+            "hallazgo_2": "Las categorías con mayor peso presupuestario concentran las principales desviaciones y deben priorizarse en el control operacional.",
+            "hallazgo_3": f"Simulación LRP 5 años con inflación {cagr_inf}% y crecimiento operacional {cagr_ops}%.",
             "rec_1": "Activar plan de control en categorías con desviación positiva superior al 10%.",
             "rec_2": "Revisar reprogramación en partidas con subejecución relevante.",
             "rec_3": "Implementar alertas tempranas mensuales por naturaleza de gasto.",
-            "footer": "Modelo Forecast 5+7 No Lineal Dinámico — Uso interno",
-            "no_sens": "No se registraron escenarios de sensibilidad.",
+            "footer": "Modelo Forecast 5+7 No Lineal Dinámico — Uso interno de gestión presupuestaria",
+            "no_sens": "No se registraron escenarios de sensibilidad en esta sesión.",
+            "findings_intro": "El modelo Forecast 5+7 proyecta el cierre anual combinando ejecución real acumulada, presupuesto restante y una curva no lineal ajustada al comportamiento reciente del gasto.",
         },
         "en": {
             "title": "Executive Report — Dynamic Non-Linear 5+7 Forecast",
@@ -1103,336 +1127,277 @@ def generar_docx_informe(
             "sec_sens": "6. Sensitivity Scenarios Log",
             "col_cat": "Category", "col_actual": "Actual YTD", "col_budget": "Budget FY",
             "col_forecast": "Forecast FY", "col_var": "Var vs Budget",
+            "param_label": "Parameter", "value_label": "Value",
             "param_cutoff": "Last actual month", "param_actual": "Actual months",
             "param_forecast": "Forecast months", "param_sens": "Execution sensitivity",
-            "param_mom": "Trend weight", "param_inf": "Annual inflation", "param_ops": "Ops growth",
+            "param_mom": "Trend weight", "param_inf": "Annual inflation",
+            "param_ops": "Ops growth",
             "kpi_actual": "Actual YTD", "kpi_budget": "Budget FY",
             "kpi_forecast": "Forecast FY Model", "kpi_var": "Variance vs Budget",
             "hallazgo_1": f"FY Model Forecast projects {money(forecast_total)}, {var_pct:+.1%} deviation vs FY Budget of {money(budget_total)}.",
-            "hallazgo_2": "Categories with the highest budget weight concentrate the main deviations.",
+            "hallazgo_2": "Categories with the highest budget weight concentrate the main deviations and should be prioritized in operational control.",
             "hallazgo_3": f"5-year LRP with {cagr_inf}% inflation and {cagr_ops}% operational growth.",
             "rec_1": "Activate control plan for categories with positive deviation above 10%.",
             "rec_2": "Review rescheduling for categories with significant under-execution.",
             "rec_3": "Implement monthly early-warning alerts by cost nature.",
-            "footer": "Dynamic Non-Linear 5+7 Forecast Model — Internal use",
-            "no_sens": "No sensitivity scenarios were recorded.",
+            "footer": "Dynamic Non-Linear 5+7 Forecast Model — Internal budget management use",
+            "no_sens": "No sensitivity scenarios were recorded in this session.",
+            "findings_intro": "The 5+7 Forecast model projects the annual close combining actual YTD spend, remaining budget, and a non-linear curve adjusted to recent spending behavior.",
         },
     }
     t = T[lang]
 
-    # Preparar datos de resumen
+    doc = Document()
+
+    # ── Estilos globales ────────────────────────────────────────
+    style = doc.styles["Normal"]
+    style.font.name = "Arial"
+    style.font.size = Pt(10)
+
+    def set_cell_bg(cell, hex_color):
+        tc = cell._tc
+        tcPr = tc.get_or_add_tcPr()
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:val"), "clear")
+        shd.set(qn("w:color"), "auto")
+        shd.set(qn("w:fill"), hex_color)
+        tcPr.append(shd)
+
+    def add_heading(text, level=1, color=None):
+        p = doc.add_paragraph()
+        p.clear()
+        run = p.add_run(text)
+        run.font.name = "Arial"
+        run.font.bold = True
+        run.font.color.rgb = color or (BLUE_DARK if level == 1 else BLUE_MID)
+        run.font.size = Pt(14 if level == 1 else 11)
+        p.paragraph_format.space_before = Pt(14 if level == 1 else 8)
+        p.paragraph_format.space_after = Pt(4)
+        if level == 1:
+            p.paragraph_format.border_bottom = None
+        return p
+
+    def add_body(text, bold=False, color=None, indent=False):
+        p = doc.add_paragraph()
+        p.clear()
+        run = p.add_run(str(text))
+        run.font.name = "Arial"
+        run.font.size = Pt(9)
+        run.font.bold = bold
+        if color:
+            run.font.color.rgb = color
+        p.paragraph_format.space_after = Pt(3)
+        if indent:
+            p.paragraph_format.left_indent = Cm(0.8)
+        return p
+
+    def add_hr():
+        p = doc.add_paragraph()
+        p.clear()
+        pPr = p._p.get_or_add_pPr()
+        pBdr = OxmlElement("w:pBdr")
+        bottom = OxmlElement("w:bottom")
+        bottom.set(qn("w:val"), "single")
+        bottom.set(qn("w:sz"), "6")
+        bottom.set(qn("w:space"), "1")
+        bottom.set(qn("w:color"), "2E75B6")
+        pBdr.append(bottom)
+        pPr.append(pBdr)
+        p.paragraph_format.space_after = Pt(6)
+
+    def add_table(headers, rows, col_widths_cm, alternate=True):
+        n_cols = len(headers)
+        tbl = doc.add_table(rows=1 + len(rows), cols=n_cols)
+        tbl.style = "Table Grid"
+
+        # Header row
+        hdr_cells = tbl.rows[0].cells
+        for i, h in enumerate(headers):
+            hdr_cells[i].text = str(h)
+            hdr_cells[i].paragraphs[0].runs[0].font.bold = True
+            hdr_cells[i].paragraphs[0].runs[0].font.name = "Arial"
+            hdr_cells[i].paragraphs[0].runs[0].font.size = Pt(8)
+            hdr_cells[i].paragraphs[0].runs[0].font.color.rgb = BLUE_DARK
+            hdr_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            set_cell_bg(hdr_cells[i], BLUE_LIGHT)
+            tbl.columns[i].width = Cm(col_widths_cm[i])
+
+        # Data rows
+        for r_idx, row in enumerate(rows):
+            cells = tbl.rows[r_idx + 1].cells
+            bg = "FFFFFF" if (r_idx % 2 == 0 or not alternate) else GRAY_BG
+            for c_idx, val in enumerate(row):
+                cells[c_idx].text = str(val)
+                run = cells[c_idx].paragraphs[0].runs[0] if cells[c_idx].paragraphs[0].runs else cells[c_idx].paragraphs[0].add_run(str(val))
+                run.font.name = "Arial"
+                run.font.size = Pt(8)
+                cells[c_idx].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT if c_idx == 0 else WD_ALIGN_PARAGRAPH.RIGHT
+                set_cell_bg(cells[c_idx], bg)
+
+        doc.add_paragraph().paragraph_format.space_after = Pt(6)
+        return tbl
+
+    # ── PORTADA ─────────────────────────────────────────────────
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_t = p_title.add_run(t["title"])
+    run_t.font.name = "Arial"
+    run_t.font.bold = True
+    run_t.font.size = Pt(18)
+    run_t.font.color.rgb = BLUE_DARK
+
+    p_sub = doc.add_paragraph()
+    p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_s = p_sub.add_run(t["subtitle"])
+    run_s.font.name = "Arial"
+    run_s.font.size = Pt(12)
+    run_s.font.color.rgb = BLUE_MID
+
+    p_date = doc.add_paragraph()
+    p_date.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_d = p_date.add_run(f"{t['date_label']}: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    run_d.font.name = "Arial"
+    run_d.font.size = Pt(9)
+    run_d.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+
+    p_per = doc.add_paragraph()
+    p_per.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_p = p_per.add_run(f"{t['period_label']}: {t['period']}")
+    run_p.font.name = "Arial"
+    run_p.font.size = Pt(9)
+    run_p.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+
+    add_hr()
+
+    # ── SECCIÓN 1: KPIs ─────────────────────────────────────────
+    add_heading(t["sec_kpi"], level=1)
+    add_hr()
+
+    kpi_tbl = doc.add_table(rows=2, cols=4)
+    kpi_tbl.style = "Table Grid"
+    kpi_headers = [t["kpi_actual"], t["kpi_budget"], t["kpi_forecast"], t["kpi_var"]]
+    kpi_values  = [money(actual_total), money(budget_total), money(forecast_total),
+                   f"{var_pct:+.1%} ({money(var_total)})"]
+    kpi_bg = ["2E75B6", "2E75B6", "2E75B6", "C00000" if var_total > 0 else "375623"]
+
+    for i in range(4):
+        lbl_cell = kpi_tbl.rows[0].cells[i]
+        val_cell = kpi_tbl.rows[1].cells[i]
+        lbl_cell.text = kpi_headers[i]
+        val_cell.text = kpi_values[i]
+        for cell in [lbl_cell, val_cell]:
+            set_cell_bg(cell, kpi_bg[i])
+            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            for run in cell.paragraphs[0].runs:
+                run.font.name = "Arial"
+                run.font.color.rgb = WHITE
+        lbl_cell.paragraphs[0].runs[0].font.size = Pt(9)
+        val_cell.paragraphs[0].runs[0].font.size = Pt(12)
+        val_cell.paragraphs[0].runs[0].font.bold = True
+
+    doc.add_paragraph().paragraph_format.space_after = Pt(8)
+
+    # ── SECCIÓN 2: Parámetros ───────────────────────────────────
+    add_heading(t["sec_model"], level=1)
+    add_hr()
+    params_data = [
+        [t["param_cutoff"],   cutoff_month],
+        [t["param_actual"],   ", ".join(actual_months)],
+        [t["param_forecast"], ", ".join(forecast_months)],
+        [t["param_sens"],     f"{sensitivity_mult:.2f}x"],
+        [t["param_mom"],      f"{momentum_mult:.2f}x"],
+        [t["param_inf"],      f"{cagr_inf}%"],
+        [t["param_ops"],      f"{cagr_ops}%"],
+    ]
+    add_table([t["param_label"], t["value_label"]], params_data, [8.5, 8.5])
+
+    # ── SECCIÓN 3: Resumen por categoría ────────────────────────
+    add_heading(t["sec_summary"], level=1)
+    add_hr()
     sum_cols = [chart_dim, "Actual_YTD", "Budget_FY_Model", "Forecast_FY_Modelo", "Var_vs_Budget"]
     sum_show = summary[[c for c in sum_cols if c in summary.columns]].copy()
+    sum_headers = [t["col_cat"], t["col_actual"], t["col_budget"], t["col_forecast"], t["col_var"]]
+    sum_rows = [
+        [str(row.get(chart_dim, "")), money(row.get("Actual_YTD", 0)),
+         money(row.get("Budget_FY_Model", 0)), money(row.get("Forecast_FY_Modelo", 0)),
+         money(row.get("Var_vs_Budget", 0))]
+        for _, row in sum_show.iterrows()
+    ]
+    add_table(sum_headers, sum_rows, [4.0, 3.1, 3.1, 3.1, 3.1])
 
-    fy_cols_lrp = [c for c in resumen_5y.columns if c.startswith("FY")]
+    # ── SECCIÓN 4: LRP 5 años ───────────────────────────────────
+    doc.add_page_break()
+    add_heading(t["sec_lrp"], level=1)
+    add_hr()
+    fy_cols_lrp  = [c for c in resumen_5y.columns if c.startswith("FY")]
     lrp_dim_cols = [c for c in ["Contexto_Mina", "Naturaleza"] if c in resumen_5y.columns]
     lrp_show_cols = lrp_dim_cols + fy_cols_lrp
     lrp_show = resumen_5y[[c for c in lrp_show_cols if c in resumen_5y.columns]].copy()
 
-    reg_cols = ["Escenario", "Timestamp", "Var Diesel", "Var FX", "Var MO",
-                "Budget Base LRP (US$ MM)", "Impacto Sens. (US$ MM)", "Budget Ajustado LRP (US$ MM)", "Var % vs Base"]
-    df_reg = pd.DataFrame(registro) if registro else pd.DataFrame()
-    reg_avail = [c for c in reg_cols if not df_reg.empty and c in df_reg.columns]
+    if len(lrp_show) > 0 and len(fy_cols_lrp) > 0:
+        n_dim = len(lrp_dim_cols)
+        n_fy  = len(fy_cols_lrp)
+        dim_w = 4.0
+        fy_w  = max(1.5, (17.0 - dim_w * n_dim) / max(n_fy, 1))
+        col_w = [dim_w] * n_dim + [fy_w] * n_fy
+        lrp_rows = []
+        for _, row in lrp_show.iterrows():
+            r = []
+            for col, val in row.items():
+                if col in lrp_dim_cols:
+                    r.append(str(val))
+                else:
+                    try:
+                        r.append(f"{float(val)/1_000_000:,.2f}")
+                    except Exception:
+                        r.append(str(val))
+            lrp_rows.append(r)
+        add_table(list(lrp_show.columns), lrp_rows, col_w)
+    else:
+        add_body("Sin datos LRP disponibles." if lang == "es" else "No LRP data available.")
 
-    # Serializar datos para el script Node
-    payload = {
-        "lang": lang,
-        "t": t,
-        "kpis": {
-            "actual": money(actual_total),
-            "budget": money(budget_total),
-            "forecast": money(forecast_total),
-            "var_mm": money(var_total),
-            "var_pct": f"{var_pct:+.1%}",
-            "var_positive": var_total > 0,
-        },
-        "params": [
-            [t["param_cutoff"], cutoff_month],
-            [t["param_actual"], ", ".join(actual_months)],
-            [t["param_forecast"], ", ".join(forecast_months)],
-            [t["param_sens"], f"{sensitivity_mult:.2f}x"],
-            [t["param_mom"], f"{momentum_mult:.2f}x"],
-            [t["param_inf"], f"{cagr_inf}%"],
-            [t["param_ops"], f"{cagr_ops}%"],
-        ],
-        "summary_headers": [t["col_cat"], t["col_actual"], t["col_budget"], t["col_forecast"], t["col_var"]],
-        "summary_rows": [
-            [
-                str(row.get(chart_dim, "")),
-                money(row.get("Actual_YTD", 0)),
-                money(row.get("Budget_FY_Model", 0)),
-                money(row.get("Forecast_FY_Modelo", 0)),
-                money(row.get("Var_vs_Budget", 0)),
-            ]
-            for _, row in sum_show.iterrows()
-        ],
-        "lrp_headers": list(lrp_show.columns),
-        "lrp_rows": [
-            [
-                (f"{float(v)/1_000_000:,.2f}" if col not in lrp_dim_cols else str(v))
-                for col, v in row.items()
-            ]
-            for _, row in lrp_show.iterrows()
-        ],
-        "reg_headers": reg_avail,
-        "reg_rows": [
-            [str(df_reg.loc[i, c]) for c in reg_avail]
-            for i in df_reg.index
-        ] if not df_reg.empty else [],
-        "date": datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
-    }
+    # ── SECCIÓN 5: Hallazgos ────────────────────────────────────
+    add_heading(t["sec_hallazgos"], level=1)
+    add_hr()
+    add_body(t["findings_intro"])
+    doc.add_paragraph()
+    for txt in [t["hallazgo_1"], t["hallazgo_2"], t["hallazgo_3"]]:
+        add_body(f"• {txt}", indent=True)
+    doc.add_paragraph()
+    add_heading("Recomendaciones" if lang == "es" else "Recommendations", level=2)
+    for rec in [t["rec_1"], t["rec_2"], t["rec_3"]]:
+        add_body(f"• {rec}", indent=True)
 
-    script = r"""
-const fs = require('fs');
-const {
-  Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
-  HeadingLevel, AlignmentType, WidthType, BorderStyle, ShadingType,
-  LevelFormat, PageNumber, Footer, Header, PageOrientation,
-  VerticalAlign, TableOfContents
-} = require('docx');
+    # ── SECCIÓN 6: Registro sensibilidades ─────────────────────
+    add_heading(t["sec_sens"], level=1)
+    add_hr()
+    if not registro:
+        add_body(t["no_sens"], color=RGBColor(0x66, 0x66, 0x66))
+    else:
+        reg_cols_show = ["Escenario", "Timestamp", "Var Diesel", "Var FX", "Var MO",
+                         "Budget Base LRP (US$ MM)", "Impacto Sens. (US$ MM)",
+                         "Budget Ajustado LRP (US$ MM)", "Var % vs Base"]
+        df_reg = pd.DataFrame(registro)
+        cols_avail = [c for c in reg_cols_show if c in df_reg.columns]
+        if cols_avail:
+            reg_rows = [[str(df_reg.loc[i, c]) for c in cols_avail] for i in df_reg.index]
+            n = len(cols_avail)
+            reg_col_w = [17.0 / n] * n
+            add_table(cols_avail, reg_rows, reg_col_w)
 
-const payload = JSON.parse(fs.readFileSync('/tmp/docx_payload.json', 'utf8'));
-const t = payload.t;
+    # ── Footer ──────────────────────────────────────────────────
+    doc.add_paragraph()
+    add_hr()
+    p_footer = doc.add_paragraph()
+    p_footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_f = p_footer.add_run(t["footer"])
+    run_f.font.name = "Arial"
+    run_f.font.size = Pt(8)
+    run_f.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
 
-const BLUE_DARK  = "1F4E79";
-const BLUE_MID   = "2E75B6";
-const BLUE_LIGHT = "D9EAF7";
-const GRAY       = "F2F2F2";
-const RED        = "C00000";
-const GREEN      = "375623";
-
-function hRule() {
-  return new Paragraph({
-    border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: BLUE_MID, space: 1 } },
-    spacing: { after: 80 },
-    children: []
-  });
-}
-
-function h1(text) {
-  return new Paragraph({
-    heading: HeadingLevel.HEADING_1,
-    spacing: { before: 200, after: 80 },
-    children: [new TextRun({ text, color: BLUE_DARK, size: 28, bold: true, font: "Arial" })]
-  });
-}
-function h2(text) {
-  return new Paragraph({
-    heading: HeadingLevel.HEADING_2,
-    spacing: { before: 140, after: 60 },
-    children: [new TextRun({ text, color: BLUE_MID, size: 24, bold: true, font: "Arial" })]
-  });
-}
-function body(text, bold=false) {
-  return new Paragraph({
-    spacing: { after: 60 },
-    children: [new TextRun({ text: String(text), size: 18, bold, font: "Arial" })]
-  });
-}
-function bullet(text) {
-  return new Paragraph({
-    spacing: { after: 60 },
-    indent: { left: 360, hanging: 180 },
-    children: [new TextRun({ text: `• ${text}`, size: 18, font: "Arial" })]
-  });
-}
-
-const border = { style: BorderStyle.SINGLE, size: 1, color: "CCCCCC" };
-const borders = { top: border, bottom: border, left: border, right: border };
-
-function makeTable(headers, rows, colWidths) {
-  const headerRow = new TableRow({
-    tableHeader: true,
-    children: headers.map((h, i) =>
-      new TableCell({
-        borders,
-        width: { size: colWidths[i], type: WidthType.DXA },
-        shading: { fill: BLUE_LIGHT, type: ShadingType.CLEAR },
-        margins: { top: 60, bottom: 60, left: 80, right: 80 },
-        children: [new Paragraph({ alignment: AlignmentType.CENTER,
-          children: [new TextRun({ text: String(h), bold: true, size: 16, color: BLUE_DARK, font: "Arial" })] })]
-      })
-    )
-  });
-
-  const dataRows = rows.map((row, ri) =>
-    new TableRow({
-      children: row.map((cell, ci) =>
-        new TableCell({
-          borders,
-          width: { size: colWidths[ci], type: WidthType.DXA },
-          shading: { fill: ri % 2 === 0 ? "FFFFFF" : GRAY, type: ShadingType.CLEAR },
-          margins: { top: 50, bottom: 50, left: 80, right: 80 },
-          children: [new Paragraph({
-            alignment: ci === 0 ? AlignmentType.LEFT : AlignmentType.RIGHT,
-            children: [new TextRun({ text: String(cell), size: 16, font: "Arial" })]
-          })]
-        })
-      )
-    })
-  );
-
-  return new Table({
-    width: { size: colWidths.reduce((a,b)=>a+b,0), type: WidthType.DXA },
-    columnWidths: colWidths,
-    rows: [headerRow, ...dataRows],
-  });
-}
-
-function kpiTable(kpis, t) {
-  const varColor = kpis.var_positive ? RED : GREEN;
-  function kpiCell(label, value, color) {
-    return new TableCell({
-      borders,
-      width: { size: 2160, type: WidthType.DXA },
-      shading: { fill: color, type: ShadingType.CLEAR },
-      margins: { top: 80, bottom: 80, left: 80, right: 80 },
-      verticalAlign: VerticalAlign.CENTER,
-      children: [
-        new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 30 },
-          children: [new TextRun({ text: label, size: 16, color: "FFFFFF", font: "Arial" })] }),
-        new Paragraph({ alignment: AlignmentType.CENTER,
-          children: [new TextRun({ text: value, size: 22, bold: true, color: "FFFFFF", font: "Arial" })] }),
-      ]
-    });
-  }
-  return new Table({
-    width: { size: 8640, type: WidthType.DXA },
-    columnWidths: [2160, 2160, 2160, 2160],
-    rows: [new TableRow({ children: [
-      kpiCell(t.kpi_actual,   kpis.actual,   BLUE_MID),
-      kpiCell(t.kpi_budget,   kpis.budget,   BLUE_MID),
-      kpiCell(t.kpi_forecast, kpis.forecast, BLUE_MID),
-      kpiCell(`${t.kpi_var}\n${kpis.var_pct}`, kpis.var_mm, varColor),
-    ]})],
-  });
-}
-
-const summaryColWidths = [2400, 1560, 1560, 1560, 1560];
-const paramsColWidths  = [4320, 4320];
-const lrpColWidths = payload.lrp_headers.length > 0
-  ? (() => { const dim = payload.lrp_headers.filter(h=>h==="Contexto_Mina"||h==="Naturaleza").length;
-             const fy  = payload.lrp_headers.length - dim;
-             return [...Array(dim).fill(2160), ...Array(fy).fill(Math.floor((8640-2160*dim)/Math.max(fy,1)))]; })()
-  : [8640];
-
-const regColWidths = payload.reg_headers.length > 0
-  ? Array(payload.reg_headers.length).fill(Math.floor(8640/payload.reg_headers.length))
-  : [8640];
-
-const children = [
-  // Título
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 200, after: 80 },
-    children: [new TextRun({ text: t.title, color: BLUE_DARK, size: 40, bold: true, font: "Arial" })] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 60 },
-    children: [new TextRun({ text: t.subtitle, color: BLUE_MID, size: 24, font: "Arial" })] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 60 },
-    children: [new TextRun({ text: `${t.date_label}: ${payload.date}`, size: 18, color: "666666", font: "Arial" })] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 160 },
-    children: [new TextRun({ text: `${t.period_label}: ${t.period}`, size: 18, color: "666666", font: "Arial" })] }),
-  hRule(),
-
-  // KPIs
-  h1(t.sec_kpi),
-  kpiTable(payload.kpis, t),
-  new Paragraph({ spacing: { after: 160 }, children: [] }),
-
-  // Parámetros
-  h1(t.sec_model),
-  makeTable(
-    [payload.lang === "es" ? "Parámetro" : "Parameter", payload.lang === "es" ? "Valor" : "Value"],
-    payload.params,
-    paramsColWidths
-  ),
-  new Paragraph({ spacing: { after: 160 }, children: [] }),
-
-  // Resumen
-  h1(t.sec_summary),
-  makeTable(payload.summary_headers, payload.summary_rows, summaryColWidths),
-  new Paragraph({ spacing: { after: 160 }, children: [] }),
-
-  // LRP
-  h1(t.sec_lrp),
-  ...(payload.lrp_rows.length > 0
-    ? [makeTable(payload.lrp_headers, payload.lrp_rows, lrpColWidths)]
-    : [body(payload.lang === "es" ? "Sin datos LRP disponibles." : "No LRP data available.")]),
-  new Paragraph({ spacing: { after: 160 }, children: [] }),
-
-  // Hallazgos
-  h1(t.sec_hallazgos),
-  body(t.hallazgo_1), body(t.hallazgo_2), body(t.hallazgo_3),
-  new Paragraph({ spacing: { after: 80 }, children: [] }),
-  bullet(t.rec_1), bullet(t.rec_2), bullet(t.rec_3),
-  new Paragraph({ spacing: { after: 160 }, children: [] }),
-
-  // Registro sensibilidades
-  h1(t.sec_sens),
-  ...(payload.reg_rows.length > 0
-    ? [makeTable(payload.reg_headers, payload.reg_rows, regColWidths)]
-    : [body(t.no_sens)]),
-  new Paragraph({ spacing: { after: 200 }, children: [] }),
-
-  // Footer line
-  new Paragraph({
-    border: { top: { style: BorderStyle.SINGLE, size: 4, color: BLUE_MID, space: 1 } },
-    spacing: { before: 100 },
-    alignment: AlignmentType.CENTER,
-    children: [new TextRun({ text: t.footer, size: 16, color: "888888", font: "Arial" })]
-  }),
-];
-
-const doc = new Document({
-  styles: {
-    default: { document: { run: { font: "Arial", size: 20 } } },
-    paragraphStyles: [
-      { id: "Heading1", name: "Heading 1", basedOn: "Normal", next: "Normal", quickFormat: true,
-        run: { size: 28, bold: true, font: "Arial" }, paragraph: { spacing: { before: 200, after: 80 }, outlineLevel: 0 } },
-      { id: "Heading2", name: "Heading 2", basedOn: "Normal", next: "Normal", quickFormat: true,
-        run: { size: 24, bold: true, font: "Arial" }, paragraph: { spacing: { before: 140, after: 60 }, outlineLevel: 1 } },
-    ]
-  },
-  sections: [{
-    properties: {
-      page: {
-        size: { width: 12240, height: 15840 },
-        margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 }
-      }
-    },
-    footers: {
-      default: new Footer({
-        children: [new Paragraph({
-          alignment: AlignmentType.CENTER,
-          children: [
-            new TextRun({ text: t.footer + " — ", size: 16, color: "888888", font: "Arial" }),
-            new TextRun({ children: [PageNumber.CURRENT], size: 16, color: "888888", font: "Arial" }),
-          ]
-        })]
-      })
-    },
-    children
-  }]
-});
-
-Packer.toBuffer(doc).then(buf => {
-  fs.writeFileSync('/tmp/informe_output.docx', buf);
-  console.log('OK');
-});
-"""
-
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, path='/tmp') if False else open('/tmp/docx_payload.json', 'w') as f:
-        json.dump(payload, f, ensure_ascii=False, default=str)
-
-    script_path = '/tmp/gen_informe.js'
-    with open(script_path, 'w') as f:
-        f.write(script)
-
-    result = subprocess.run(['node', script_path], capture_output=True, text=True, timeout=60)
-    if result.returncode != 0:
-        raise RuntimeError(f"Error generando DOCX: {result.stderr}")
-
-    with open('/tmp/informe_output.docx', 'rb') as f:
-        return f.read()
-
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 # ═══════════════════════════════════════════════════════════════
 # ESTADO DE SESIÓN PARA REGISTRO DE SENSIBILIDADES
@@ -2032,19 +1997,25 @@ with tab_informe:
                     for lang in langs:
                         lang_label = "ES" if lang == "es" else "EN"
                         if gen_pdf:
-                            try:
-                                pdf_bytes = generar_pdf_informe(lang=lang, **args_informe)
-                                generated[f"pdf_{lang}"] = (pdf_bytes, f"informe_forecast_{lang_label}_{ts}.pdf",
-                                                             "application/pdf")
-                            except Exception as e:
-                                st.error(f"Error PDF {lang_label}: {e}")
+                            if not REPORTLAB_OK:
+                                st.error("❌ ReportLab no instalado. Agrega 'reportlab' a requirements.txt y redespliega.")
+                            else:
+                                try:
+                                    pdf_bytes = generar_pdf_informe(lang=lang, **args_informe)
+                                    generated[f"pdf_{lang}"] = (pdf_bytes, f"informe_forecast_{lang_label}_{ts}.pdf",
+                                                                 "application/pdf")
+                                except Exception as e:
+                                    st.error(f"Error PDF {lang_label}: {e}")
                         if gen_docx:
-                            try:
-                                docx_bytes = generar_docx_informe(lang=lang, **args_informe)
-                                generated[f"docx_{lang}"] = (docx_bytes, f"informe_forecast_{lang_label}_{ts}.docx",
-                                                              "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-                            except Exception as e:
-                                st.error(f"Error DOCX {lang_label}: {e}")
+                            if not PYTHON_DOCX_OK:
+                                st.error("❌ python-docx no instalado. Agrega 'python-docx' a requirements.txt y redespliega.")
+                            else:
+                                try:
+                                    docx_bytes = generar_docx_informe(lang=lang, **args_informe)
+                                    generated[f"docx_{lang}"] = (docx_bytes, f"informe_forecast_{lang_label}_{ts}.docx",
+                                                                  "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                                except Exception as e:
+                                    st.error(f"Error DOCX {lang_label}: {e}")
 
                 if generated:
                     st.success(f"✅ {len(generated)} archivo(s) listo(s). Descárgalos a continuación:")
