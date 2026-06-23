@@ -661,9 +661,20 @@ chart_dim = st.selectbox("Agrupar dashboard por", chart_dim_options, index=0)
 summary = aggregate_for_charts(filtered, chart_dim)
 
 # ═══════════════════════════════════════════════════════════════
+# ESTADO DE SESIÓN PARA REGISTRO DE SENSIBILIDADES
+# ═══════════════════════════════════════════════════════════════
+if "registro_sensibilidades" not in st.session_state:
+    st.session_state["registro_sensibilidades"] = []
+
+# ═══════════════════════════════════════════════════════════════
 # PESTAÑAS PRINCIPALES
 # ═══════════════════════════════════════════════════════════════
-tab_actual, tab_5y = st.tabs(["📊 Forecast Año Actual (5+7)", "🚀 Simulación LRP a 5 Años"])
+tab_actual, tab_5y, tab_sens, tab_registro = st.tabs([
+    "📊 Forecast Año Actual (5+7)",
+    "🚀 Simulación LRP a 5 Años",
+    "⚙️ Módulo de Sensibilidades",
+    "📋 Registro de Versiones",
+])
 
 # ─────────────────────────────────────────────
 # PESTAÑA 1: FORECAST AÑO ACTUAL
@@ -859,5 +870,290 @@ with tab_5y:
 
     else:
         st.warning("⚠️ No hay datos para simular. Ajusta los filtros en el menú lateral.")
+
+# ─────────────────────────────────────────────
+# PESTAÑA 3: MÓDULO DE SENSIBILIDADES
+# ─────────────────────────────────────────────
+with tab_sens:
+    st.subheader("⚙️ Módulo de Sensibilidades Macroeconómicas")
+    st.caption("Analiza el impacto económico de variaciones en precios de combustible, divisa y mano de obra sobre el Budget 2027–2031.")
+
+    if len(filtered) == 0:
+        st.warning("⚠️ No hay datos cargados. Ajusta los filtros en el menú lateral.")
+    else:
+        año_base_s = datetime.datetime.now().year
+
+        # ── Calcular base LRP sin sensibilidades ──────────────────────────
+        df_base_s = simular_5_anos(filtered, cagr_inf, cagr_ops)
+        cols_agrup_s = ["Contexto_Mina"]
+        año_cols_s = ["Año_1", "Año_2", "Año_3", "Año_4", "Año_5"]
+        base_lrp = df_base_s.groupby(cols_agrup_s)[año_cols_s].sum()
+        total_base_por_año = base_lrp.sum()  # Serie: Año_1..5
+
+        # Pesos de cada categoría sobre el total base (para calcular impacto parcial)
+        peso_fuel    = base_lrp.loc["Fuel"].sum()    / total_base_por_año.sum() if "Fuel"  in base_lrp.index else 0.0
+        peso_power   = base_lrp.loc["Power"].sum()   / total_base_por_año.sum() if "Power" in base_lrp.index else 0.0
+        peso_labor   = base_lrp.loc["Labor"].sum()   / total_base_por_año.sum() if "Labor" in base_lrp.index else 0.0
+
+        st.markdown("---")
+        st.markdown("### 🔧 Configurar escenario de sensibilidad")
+
+        nombre_escenario = st.text_input("Nombre del escenario", value=f"Escenario {len(st.session_state['registro_sensibilidades'])+1}")
+
+        col_s1, col_s2, col_s3 = st.columns(3)
+
+        with col_s1:
+            st.markdown("#### ⛽ Combustible / Diesel")
+            precio_diesel_base = st.number_input("Precio base diesel (US$/lt)", value=0.85, step=0.01, format="%.3f")
+            precio_diesel_nuevo = st.number_input("Precio estimado diesel (US$/lt)", value=0.85, step=0.01, format="%.3f")
+            var_diesel_pct = safe_div(precio_diesel_nuevo - precio_diesel_base, precio_diesel_base, 0.0)
+            st.metric("Variación Diesel", f"{var_diesel_pct:+.1%}", delta_color="inverse")
+
+        with col_s2:
+            st.markdown("#### 💱 Divisa (CLP/USD)")
+            tipo_cambio_base = st.number_input("Tipo de cambio base (CLP/USD)", value=900.0, step=1.0, format="%.0f")
+            tipo_cambio_nuevo = st.number_input("Tipo de cambio estimado (CLP/USD)", value=900.0, step=1.0, format="%.0f")
+            var_fx_pct = safe_div(tipo_cambio_nuevo - tipo_cambio_base, tipo_cambio_base, 0.0)
+            st.metric("Variación Divisa", f"{var_fx_pct:+.1%}", delta_color="normal")
+
+        with col_s3:
+            st.markdown("#### 👷 Mano de Obra (Labor)")
+            costo_mo_base = st.number_input("Costo MO base (US$/hora)", value=25.0, step=0.5, format="%.2f")
+            costo_mo_nuevo = st.number_input("Costo MO estimado (US$/hora)", value=25.0, step=0.5, format="%.2f")
+            var_mo_pct = safe_div(costo_mo_nuevo - costo_mo_base, costo_mo_base, 0.0)
+            st.metric("Variación Mano de Obra", f"{var_mo_pct:+.1%}", delta_color="inverse")
+
+        st.markdown("---")
+
+        # ── Parámetros de sensibilidad por categoría ───────────────────────
+        with st.expander("🎚️ Ajustar sensibilidad por categoría (avanzado)", expanded=False):
+            st.caption("Define qué % del costo de cada categoría es sensible a cada variable macro.")
+            cs1, cs2, cs3 = st.columns(3)
+            with cs1:
+                sens_diesel_fuel  = st.slider("Sensibilidad Diesel → Fuel (%)", 0, 100, 80) / 100
+                sens_diesel_spare = st.slider("Sensibilidad Diesel → Spare Parts (%)", 0, 100, 20) / 100
+                sens_diesel_maint = st.slider("Sensibilidad Diesel → Maintenance (%)", 0, 100, 10) / 100
+            with cs2:
+                sens_fx_fuel      = st.slider("Sensibilidad FX → Fuel (%)", 0, 100, 60) / 100
+                sens_fx_spare     = st.slider("Sensibilidad FX → Spare Parts (%)", 0, 100, 50) / 100
+                sens_fx_contract  = st.slider("Sensibilidad FX → Contractors (%)", 0, 100, 30) / 100
+            with cs3:
+                sens_mo_labor     = st.slider("Sensibilidad MO → Labor (%)", 0, 100, 90) / 100
+                sens_mo_contract  = st.slider("Sensibilidad MO → Contractors (%)", 0, 100, 40) / 100
+                sens_mo_maint     = st.slider("Sensibilidad MO → Maintenance (%)", 0, 100, 20) / 100
+
+        # ── Calcular impacto por año y categoría ──────────────────────────
+        def calcular_impacto_sens(base_lrp, var_diesel, var_fx, var_mo,
+                                   sd_fuel, sd_spare, sd_maint,
+                                   sfx_fuel, sfx_spare, sfx_contract,
+                                   smo_labor, smo_contract, smo_maint):
+            impacto = {}
+            for ctx in base_lrp.index:
+                row = base_lrp.loc[ctx].copy()
+                delta = pd.Series(0.0, index=row.index)
+                if ctx == "Fuel":
+                    delta += row * (var_diesel * sd_fuel + var_fx * sfx_fuel)
+                elif ctx == "Spare Parts":
+                    delta += row * (var_diesel * sd_spare + var_fx * sfx_spare)
+                elif ctx == "Maintenance":
+                    delta += row * (var_diesel * sd_maint + var_mo * smo_maint)
+                elif ctx == "Labor":
+                    delta += row * (var_mo * smo_labor)
+                elif ctx == "Contractors":
+                    delta += row * (var_fx * sfx_contract + var_mo * smo_contract)
+                impacto[ctx] = delta
+            return pd.DataFrame(impacto).T
+
+        df_impacto = calcular_impacto_sens(
+            base_lrp, var_diesel_pct, var_fx_pct, var_mo_pct,
+            sens_diesel_fuel, sens_diesel_spare, sens_diesel_maint,
+            sens_fx_fuel, sens_fx_spare, sens_fx_contract,
+            sens_mo_labor, sens_mo_contract, sens_mo_maint,
+        )
+
+        total_base   = total_base_por_año.sum()
+        total_impacto_por_año = df_impacto.sum()
+        total_impacto = total_impacto_por_año.sum()
+        total_nuevo  = total_base + total_impacto
+        var_pct_sens = safe_div(total_impacto, total_base, 0.0)
+
+        # ── KPIs de impacto ────────────────────────────────────────────────
+        st.markdown("### 📊 Impacto estimado sobre Budget LRP 2027–2031")
+        ks1, ks2, ks3, ks4 = st.columns(4)
+        ks1.metric("Budget Base LRP", money(total_base))
+        ks2.metric("Impacto Total Sensibilidades", money(total_impacto), f"{var_pct_sens:+.1%}", delta_color="inverse")
+        ks3.metric("Budget Ajustado LRP", money(total_nuevo))
+        ks4.metric("Variación vs Base", f"{var_pct_sens:+.1%}", delta_color="inverse")
+
+        # ── Tabla impacto por categoría y año ─────────────────────────────
+        st.markdown("#### Impacto por categoría (US$ MM)")
+        fy_labels = [f"FY{str(año_base_s + i)[2:]}" for i in range(1, 6)]
+        df_impacto_display = df_impacto.copy()
+        df_impacto_display.columns = fy_labels
+        df_impacto_display["Total Impacto"] = df_impacto_display.sum(axis=1)
+        df_impacto_display["% sobre Base"] = [
+            safe_div(df_impacto_display.loc[ctx, "Total Impacto"], base_lrp.loc[ctx].sum(), 0.0)
+            if ctx in base_lrp.index else 0.0
+            for ctx in df_impacto_display.index
+        ]
+        df_impacto_display_fmt = df_impacto_display.copy()
+        for col in fy_labels + ["Total Impacto"]:
+            df_impacto_display_fmt[col] = df_impacto_display_fmt[col].apply(lambda v: f"US$ {v/1_000_000:,.2f} MM")
+        df_impacto_display_fmt["% sobre Base"] = df_impacto_display_fmt["% sobre Base"].apply(lambda v: f"{v:+.1%}")
+        st.dataframe(df_impacto_display_fmt, use_container_width=True)
+
+        # ── Gráfico tornado ────────────────────────────────────────────────
+        st.markdown("#### 🌪️ Gráfico Tornado — Impacto por categoría")
+        tornado_df = pd.DataFrame({
+            "Categoría": df_impacto_display.index,
+            "Impacto (US$ MM)": df_impacto_display["Total Impacto"] / 1_000_000,
+        }).sort_values("Impacto (US$ MM)")
+        fig_tornado = px.bar(
+            tornado_df, x="Impacto (US$ MM)", y="Categoría", orientation="h",
+            color="Impacto (US$ MM)",
+            color_continuous_scale=["#E45756", "#FFFFFF", "#4C78A8"],
+            color_continuous_midpoint=0,
+            title="Impacto neto por categoría ante variaciones macro",
+        )
+        fig_tornado.update_layout(showlegend=False, height=400)
+        st.plotly_chart(fig_tornado, use_container_width=True)
+
+        # ── Gráfico evolución anual base vs ajustado ───────────────────────
+        st.markdown("#### 📈 Evolución anual: Base vs Ajustado por sensibilidades")
+        evol_df = pd.DataFrame({
+            "Año": fy_labels,
+            "Base": total_base_por_año.values / 1_000_000,
+            "Ajustado": (total_base_por_año + total_impacto_por_año).values / 1_000_000,
+        })
+        fig_evol = go.Figure()
+        fig_evol.add_trace(go.Scatter(x=evol_df["Año"], y=evol_df["Base"], name="Budget Base", mode="lines+markers", line=dict(color="#4C78A8", width=2)))
+        fig_evol.add_trace(go.Scatter(x=evol_df["Año"], y=evol_df["Ajustado"], name="Budget Ajustado", mode="lines+markers", line=dict(color="#E45756", width=2, dash="dash")))
+        fig_evol.update_layout(title="Budget Base vs Ajustado por sensibilidades (US$ MM)", yaxis_title="US$ MM", height=380)
+        st.plotly_chart(fig_evol, use_container_width=True)
+
+        # ── Botón guardar escenario en registro ───────────────────────────
+        st.markdown("---")
+        if st.button(f"💾 Guardar escenario '{nombre_escenario}' en el Registro", use_container_width=True):
+            registro_entry = {
+                "Escenario": nombre_escenario,
+                "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "Diesel base (US$/lt)": precio_diesel_base,
+                "Diesel estimado (US$/lt)": precio_diesel_nuevo,
+                "Var Diesel": f"{var_diesel_pct:+.1%}",
+                "FX base (CLP/USD)": tipo_cambio_base,
+                "FX estimado (CLP/USD)": tipo_cambio_nuevo,
+                "Var FX": f"{var_fx_pct:+.1%}",
+                "MO base (US$/hr)": costo_mo_base,
+                "MO estimado (US$/hr)": costo_mo_nuevo,
+                "Var MO": f"{var_mo_pct:+.1%}",
+                "Inflación (%)": cagr_inf,
+                "Crec. Ops (%)": cagr_ops,
+                "Budget Base LRP (US$ MM)": round(total_base / 1_000_000, 2),
+                "Impacto Sens. (US$ MM)": round(total_impacto / 1_000_000, 2),
+                "Budget Ajustado LRP (US$ MM)": round(total_nuevo / 1_000_000, 2),
+                "Var % vs Base": f"{var_pct_sens:+.1%}",
+            }
+            # Agregar impacto por año
+            for fy, imp in zip(fy_labels, total_impacto_por_año.values):
+                registro_entry[f"Impacto {fy} (US$ MM)"] = round(imp / 1_000_000, 2)
+            # Agregar budget ajustado por año
+            for fy, base, imp in zip(fy_labels, total_base_por_año.values, total_impacto_por_año.values):
+                registro_entry[f"Ajustado {fy} (US$ MM)"] = round((base + imp) / 1_000_000, 2)
+
+            st.session_state["registro_sensibilidades"].append(registro_entry)
+            st.success(f"✅ Escenario '{nombre_escenario}' guardado. Ve a la pestaña 📋 Registro de Versiones para comparar.")
+
+
+# ─────────────────────────────────────────────
+# PESTAÑA 4: REGISTRO DE VERSIONES
+# ─────────────────────────────────────────────
+with tab_registro:
+    st.subheader("📋 Registro de Versiones de Budget 2027–2031")
+    st.caption("Historial de escenarios generados en esta sesión. Cada iteración del módulo de sensibilidades genera una nueva versión del Budget.")
+
+    if len(st.session_state["registro_sensibilidades"]) == 0:
+        st.info("Aún no hay versiones registradas. Ve al módulo ⚙️ Sensibilidades, configura un escenario y presiona 'Guardar escenario'.")
+    else:
+        df_registro = pd.DataFrame(st.session_state["registro_sensibilidades"])
+
+        st.markdown(f"**{len(df_registro)} versión(es) registrada(s) en esta sesión**")
+        st.dataframe(df_registro, use_container_width=True, hide_index=True)
+
+        # ── Gráfico comparativo de escenarios ─────────────────────────────
+        if len(df_registro) > 1:
+            st.markdown("#### 📊 Comparativo de Budget Ajustado LRP por escenario")
+            fy_labels_r = [f"FY{str(datetime.datetime.now().year + i)[2:]}" for i in range(1, 6)]
+            cols_ajust = [f"Ajustado {fy} (US$ MM)" for fy in fy_labels_r]
+            cols_disponibles = [c for c in cols_ajust if c in df_registro.columns]
+
+            if cols_disponibles:
+                comp_largo = df_registro[["Escenario"] + cols_disponibles].melt(
+                    id_vars="Escenario", var_name="Año", value_name="Budget Ajustado (US$ MM)"
+                )
+                comp_largo["Año"] = comp_largo["Año"].str.extract(r"(FY\d+)")
+                fig_comp = px.line(
+                    comp_largo, x="Año", y="Budget Ajustado (US$ MM)", color="Escenario",
+                    markers=True, title="Evolución LRP por escenario de sensibilidad",
+                )
+                st.plotly_chart(fig_comp, use_container_width=True)
+
+            st.markdown("#### 🔢 Impacto total por escenario (US$ MM)")
+            fig_bar_comp = px.bar(
+                df_registro, x="Escenario", y="Impacto Sens. (US$ MM)",
+                color="Impacto Sens. (US$ MM)",
+                color_continuous_scale=["#4C78A8", "#FFFFFF", "#E45756"],
+                color_continuous_midpoint=0,
+                title="Impacto neto de sensibilidades por escenario (US$ MM)",
+                text="Impacto Sens. (US$ MM)",
+            )
+            fig_bar_comp.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+            fig_bar_comp.update_layout(showlegend=False, height=380)
+            st.plotly_chart(fig_bar_comp, use_container_width=True)
+
+        # ── Descarga Excel del registro ────────────────────────────────────
+        def registro_a_excel(df_reg: pd.DataFrame) -> bytes:
+            out = io.BytesIO()
+            with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+                wb = writer.book
+                header_fmt = wb.add_format({"bold": True, "bg_color": "#D9EAF7", "border": 1})
+                money_fmt  = wb.add_format({"num_format": '#,##0.00'})
+
+                df_reg.to_excel(writer, index=False, sheet_name="Registro_Sensibilidades")
+                ws = writer.sheets["Registro_Sensibilidades"]
+                for c, col in enumerate(df_reg.columns):
+                    ws.write(0, c, col, header_fmt)
+                    width = min(max(len(str(col)) + 2, 14), 38)
+                    ws.set_column(c, c, width)
+
+                # Hoja resumen por año
+                fy_labels_e = [f"FY{str(datetime.datetime.now().year + i)[2:]}" for i in range(1, 6)]
+                cols_base_e    = [f"Ajustado {fy} (US$ MM)" for fy in fy_labels_e if f"Ajustado {fy} (US$ MM)" in df_reg.columns]
+                cols_impacto_e = [f"Impacto {fy} (US$ MM)"  for fy in fy_labels_e if f"Impacto {fy} (US$ MM)"  in df_reg.columns]
+
+                if cols_base_e:
+                    resumen_anual = df_reg[["Escenario", "Timestamp"] + cols_base_e + cols_impacto_e]
+                    resumen_anual.to_excel(writer, index=False, sheet_name="Resumen_Anual_Escenarios")
+                    ws2 = writer.sheets["Resumen_Anual_Escenarios"]
+                    for c, col in enumerate(resumen_anual.columns):
+                        ws2.write(0, c, col, header_fmt)
+                        ws2.set_column(c, c, 22)
+
+            return out.getvalue()
+
+        excel_registro = registro_a_excel(df_registro)
+        st.download_button(
+            label="⬇️ Descargar Registro completo de Sensibilidades (Excel)",
+            data=excel_registro,
+            file_name=f"registro_sensibilidades_lrp_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+        # ── Limpiar registro ───────────────────────────────────────────────
+        if st.button("🗑️ Limpiar registro de esta sesión", use_container_width=True):
+            st.session_state["registro_sensibilidades"] = []
+            st.rerun()
+
+st.caption("Modelo diseñado para defensa académica: combina ejecución acumulada, tendencia reciente, curva no lineal y contexto minero.")
 
 st.caption("Modelo diseñado para defensa académica: combina ejecución acumulada, tendencia reciente, curva no lineal y contexto minero.")
