@@ -6,7 +6,11 @@ from __future__ import annotations
 
 import datetime
 import io
+import json
+import os
 import re
+import subprocess
+import tempfile
 import unicodedata
 from typing import Dict, List, Optional, Tuple
 
@@ -15,6 +19,18 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+
+# ReportLab para PDF
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch, cm
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    PageBreak, HRFlowable, KeepTogether
+)
+from reportlab.platypus.flowables import HRFlowable
 
 st.set_page_config(
     page_title="Forecast 5+7 No Lineal Dinámico",
@@ -660,6 +676,764 @@ chart_dim_options = ["Naturaleza", "Contexto_Mina"] + [c for c in extra_dims if 
 chart_dim = st.selectbox("Agrupar dashboard por", chart_dim_options, index=0)
 summary = aggregate_for_charts(filtered, chart_dim)
 
+# ─────────────────────────────────────────────
+# GENERACIÓN DE INFORME PDF (ES + EN)
+# ─────────────────────────────────────────────
+
+def generar_pdf_informe(
+    lang: str,
+    actual_total: float,
+    budget_total: float,
+    forecast_total: float,
+    var_total: float,
+    var_pct: float,
+    summary: pd.DataFrame,
+    chart_dim: str,
+    actual_months: List[str],
+    forecast_months: List[str],
+    cutoff_month: str,
+    sensitivity_mult: float,
+    momentum_mult: float,
+    cagr_inf: float,
+    cagr_ops: float,
+    resumen_5y: pd.DataFrame,
+    registro: List[dict],
+) -> bytes:
+    """Genera informe ejecutivo en PDF en español o inglés."""
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        rightMargin=1.8*cm, leftMargin=1.8*cm,
+        topMargin=2*cm, bottomMargin=2*cm,
+    )
+
+    # ── Estilos ────────────────────────────────────────────────
+    styles = getSampleStyleSheet()
+    COLOR_HEADER = colors.HexColor("#1F4E79")
+    COLOR_ACCENT = colors.HexColor("#2E75B6")
+    COLOR_LIGHT  = colors.HexColor("#D9EAF7")
+    COLOR_GREEN  = colors.HexColor("#C6EFCE")
+    COLOR_RED    = colors.HexColor("#FFC7CE")
+    COLOR_GRAY   = colors.HexColor("#F2F2F2")
+
+    s_title = ParagraphStyle("s_title", parent=styles["Title"],
+        fontSize=20, textColor=COLOR_HEADER, spaceAfter=6, alignment=TA_CENTER, fontName="Helvetica-Bold")
+    s_subtitle = ParagraphStyle("s_subtitle", parent=styles["Normal"],
+        fontSize=11, textColor=COLOR_ACCENT, spaceAfter=14, alignment=TA_CENTER, fontName="Helvetica")
+    s_h1 = ParagraphStyle("s_h1", parent=styles["Heading1"],
+        fontSize=13, textColor=COLOR_HEADER, spaceBefore=14, spaceAfter=6, fontName="Helvetica-Bold",
+        borderPad=4, borderColor=COLOR_ACCENT, borderWidth=0)
+    s_h2 = ParagraphStyle("s_h2", parent=styles["Heading2"],
+        fontSize=11, textColor=COLOR_ACCENT, spaceBefore=10, spaceAfter=4, fontName="Helvetica-Bold")
+    s_body = ParagraphStyle("s_body", parent=styles["Normal"],
+        fontSize=9, spaceAfter=5, leading=13, fontName="Helvetica")
+    s_body_bold = ParagraphStyle("s_body_bold", parent=s_body, fontName="Helvetica-Bold")
+    s_caption = ParagraphStyle("s_caption", parent=styles["Normal"],
+        fontSize=8, textColor=colors.gray, spaceAfter=4, fontName="Helvetica")
+    s_kpi_label = ParagraphStyle("s_kpi_label", parent=styles["Normal"],
+        fontSize=8, textColor=colors.white, alignment=TA_CENTER, fontName="Helvetica")
+    s_kpi_value = ParagraphStyle("s_kpi_value", parent=styles["Normal"],
+        fontSize=14, textColor=colors.white, alignment=TA_CENTER, fontName="Helvetica-Bold")
+
+    # ── Textos bilingues ───────────────────────────────────────
+    T = {
+        "es": {
+            "title": "Informe Ejecutivo — Forecast 5+7 No Lineal Dinámico",
+            "subtitle": "Análisis de Presupuesto y Proyección Minera",
+            "date_label": "Fecha de generación:",
+            "period": f"Período real: Jan — {cutoff_month} | Período forecast: {forecast_months[0] if forecast_months else '—'} — {forecast_months[-1] if forecast_months else '—'}",
+            "sec_kpi": "1. KPIs Ejecutivos",
+            "kpi_actual": "Actual YTD",
+            "kpi_budget": "Budget FY",
+            "kpi_forecast": "Forecast FY Modelo",
+            "kpi_var": "Variación vs Budget",
+            "sec_model": "2. Parámetros del Modelo",
+            "param_cutoff": "Último mes real (YTD)",
+            "param_actual": "Meses reales",
+            "param_forecast": "Meses forecast",
+            "param_sens": "Sensibilidad ejecución YTD",
+            "param_mom": "Peso tendencia reciente",
+            "param_inf": "Inflación anual estimada",
+            "param_ops": "Crecimiento operacional anual",
+            "sec_summary": "3. Resumen por Categoría",
+            "col_cat": "Categoría",
+            "col_actual": "Actual YTD",
+            "col_budget": "Budget FY",
+            "col_forecast": "Forecast FY",
+            "col_var": "Var vs Budget",
+            "col_var_pct": "Var %",
+            "sec_lrp": "4. Simulación LRP 5 Años (US$ MM)",
+            "sec_hallazgos": "5. Hallazgos y Recomendaciones",
+            "sec_sens": "6. Registro de Sensibilidades",
+            "no_sens": "No se registraron escenarios de sensibilidad en esta sesión.",
+            "methodology": "Metodología del Modelo",
+            "method_body": (
+                "El modelo Forecast 5+7 proyecta el cierre anual combinando: (1) Factor de ejecución: "
+                "gasto real acumulado vs presupuesto acumulado. (2) Factor de tendencia: meses recientes "
+                "vs meses iniciales. (3) Curva no lineal logística distribuida en los meses restantes. "
+                "(4) Contexto minero: parámetros diferenciados según naturaleza del gasto (Fuel, Labor, "
+                "Maintenance, Power, Contractors, Spare Parts, Rehandling, Other)."
+            ),
+            "footer": "Modelo Forecast 5+7 No Lineal Dinámico — Uso interno de gestión presupuestaria",
+            "over": "SOBREEJECUCIÓN",
+            "under": "SUBEJECUCIÓN",
+            "on_track": "ALINEADO",
+            "hallazgo_1": f"El Forecast FY Modelo proyecta un cierre de {money(forecast_total)}, representando una desviación de {var_pct:+.1%} respecto al Budget FY de {money(budget_total)}.",
+            "hallazgo_2": "Las categorías con mayor peso presupuestario concentran las principales desviaciones y deben priorizarse en el control operacional.",
+            "hallazgo_3": f"La simulación LRP a 5 años incorpora una inflación de {cagr_inf}% y crecimiento operacional de {cagr_ops}%, proyectando la estructura de costos hasta el año {datetime.datetime.now().year + 5}.",
+            "rec_1": "Activar plan de control en categorías con desviación positiva superior al 10%.",
+            "rec_2": "Revisar reprogramación operacional en partidas con subejecución relevante.",
+            "rec_3": "Implementar alertas tempranas mensuales por naturaleza de gasto y centro de costo.",
+        },
+        "en": {
+            "title": "Executive Report — Dynamic Non-Linear 5+7 Forecast",
+            "subtitle": "Mining Budget Analysis & Projection",
+            "date_label": "Generated on:",
+            "period": f"Actual period: Jan — {cutoff_month} | Forecast period: {forecast_months[0] if forecast_months else '—'} — {forecast_months[-1] if forecast_months else '—'}",
+            "sec_kpi": "1. Executive KPIs",
+            "kpi_actual": "Actual YTD",
+            "kpi_budget": "Budget FY",
+            "kpi_forecast": "Forecast FY Model",
+            "kpi_var": "Variance vs Budget",
+            "sec_model": "2. Model Parameters",
+            "param_cutoff": "Last actual month (YTD)",
+            "param_actual": "Actual months",
+            "param_forecast": "Forecast months",
+            "param_sens": "YTD execution sensitivity",
+            "param_mom": "Recent trend weight",
+            "param_inf": "Estimated annual inflation",
+            "param_ops": "Annual operational growth",
+            "sec_summary": "3. Summary by Category",
+            "col_cat": "Category",
+            "col_actual": "Actual YTD",
+            "col_budget": "Budget FY",
+            "col_forecast": "Forecast FY",
+            "col_var": "Var vs Budget",
+            "col_var_pct": "Var %",
+            "sec_lrp": "4. 5-Year LRP Simulation (US$ MM)",
+            "sec_hallazgos": "5. Findings & Recommendations",
+            "sec_sens": "6. Sensitivity Scenarios Log",
+            "no_sens": "No sensitivity scenarios were recorded in this session.",
+            "methodology": "Model Methodology",
+            "method_body": (
+                "The 5+7 Forecast model projects the annual close by combining: (1) Execution factor: "
+                "actual YTD spend vs YTD budget. (2) Trend factor: recent months vs early months. "
+                "(3) Non-linear logistic curve distributed over remaining months. "
+                "(4) Mining context: differentiated parameters by cost nature (Fuel, Labor, "
+                "Maintenance, Power, Contractors, Spare Parts, Rehandling, Other)."
+            ),
+            "footer": "Dynamic Non-Linear 5+7 Forecast Model — Internal budget management use",
+            "over": "OVER BUDGET",
+            "under": "UNDER BUDGET",
+            "on_track": "ON TRACK",
+            "hallazgo_1": f"The FY Model Forecast projects a year-end close of {money(forecast_total)}, representing a {var_pct:+.1%} deviation vs the FY Budget of {money(budget_total)}.",
+            "hallazgo_2": "Categories with the highest budget weight concentrate the main deviations and should be prioritized in operational control.",
+            "hallazgo_3": f"The 5-year LRP simulation incorporates {cagr_inf}% inflation and {cagr_ops}% operational growth, projecting the cost structure through year {datetime.datetime.now().year + 5}.",
+            "rec_1": "Activate control plan for categories with positive deviation above 10%.",
+            "rec_2": "Review operational rescheduling for categories with significant under-execution.",
+            "rec_3": "Implement monthly early-warning alerts by cost nature and cost center.",
+        },
+    }
+    t = T[lang]
+
+    # ── Helpers de tabla ───────────────────────────────────────
+    def make_table(data, col_widths, header_bg=COLOR_LIGHT):
+        tbl = Table(data, colWidths=col_widths, repeatRows=1)
+        style = TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), header_bg),
+            ("TEXTCOLOR",  (0, 0), (-1, 0), COLOR_HEADER),
+            ("FONTNAME",   (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE",   (0, 0), (-1, 0), 8),
+            ("ALIGN",      (0, 0), (-1, 0), "CENTER"),
+            ("FONTNAME",   (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE",   (0, 1), (-1, -1), 8),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, COLOR_GRAY]),
+            ("GRID",       (0, 0), (-1, -1), 0.4, colors.HexColor("#CCCCCC")),
+            ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 6),
+        ])
+        tbl.setStyle(style)
+        return tbl
+
+    def kpi_box(label, value, color=COLOR_ACCENT):
+        return Table(
+            [[Paragraph(label, s_kpi_label)], [Paragraph(value, s_kpi_value)]],
+            colWidths=[4.5*cm],
+            style=TableStyle([
+                ("BACKGROUND", (0, 0), (0, -1), color),
+                ("ROWBACKGROUNDS", (0, 0), (0, -1), [color, color]),
+                ("ALIGN",   (0, 0), (0, -1), "CENTER"),
+                ("VALIGN",  (0, 0), (0, -1), "MIDDLE"),
+                ("TOPPADDING",    (0, 0), (0, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (0, -1), 8),
+                ("LEFTPADDING",   (0, 0), (0, -1), 4),
+                ("RIGHTPADDING",  (0, 0), (0, -1), 4),
+                ("ROUNDEDCORNERS", [4]),
+            ])
+        )
+
+    # ── Construcción del documento ─────────────────────────────
+    story = []
+
+    # Portada
+    story.append(Spacer(1, 1.5*cm))
+    story.append(Paragraph("⛏️", ParagraphStyle("icon", fontSize=32, alignment=TA_CENTER, spaceAfter=8)))
+    story.append(Paragraph(t["title"], s_title))
+    story.append(Paragraph(t["subtitle"], s_subtitle))
+    story.append(HRFlowable(width="100%", thickness=2, color=COLOR_ACCENT, spaceAfter=8))
+    story.append(Paragraph(f"{t['date_label']} {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}", s_caption))
+    story.append(Paragraph(t["period"], s_caption))
+    story.append(Spacer(1, 0.5*cm))
+
+    # ── Sección 1: KPIs ────────────────────────────────────────
+    story.append(Paragraph(t["sec_kpi"], s_h1))
+    story.append(HRFlowable(width="100%", thickness=1, color=COLOR_LIGHT, spaceAfter=6))
+
+    kpi_color = COLOR_RED if var_total > 0 else (COLOR_GREEN if var_total < 0 else COLOR_ACCENT)
+    kpi_color_rl = colors.HexColor("#C00000") if var_total > 0 else (colors.HexColor("#375623") if var_total < 0 else COLOR_ACCENT)
+    var_label = t["over"] if var_total > 0 else (t["under"] if var_total < 0 else t["on_track"])
+
+    kpi_row = Table(
+        [[
+            kpi_box(t["kpi_actual"],   money(actual_total),   COLOR_ACCENT),
+            kpi_box(t["kpi_budget"],   money(budget_total),   COLOR_ACCENT),
+            kpi_box(t["kpi_forecast"], money(forecast_total), COLOR_ACCENT),
+            kpi_box(f"{t['kpi_var']}\n{var_label}", f"{var_pct:+.1%}\n{money(var_total)}", kpi_color_rl),
+        ]],
+        colWidths=[4.5*cm, 4.5*cm, 4.5*cm, 4.5*cm],
+        style=TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER"), ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+                          ("LEFTPADDING", (0,0), (-1,-1), 4), ("RIGHTPADDING", (0,0), (-1,-1), 4)])
+    )
+    story.append(kpi_row)
+    story.append(Spacer(1, 0.4*cm))
+
+    # ── Sección 2: Parámetros del modelo ──────────────────────
+    story.append(Paragraph(t["sec_model"], s_h1))
+    story.append(HRFlowable(width="100%", thickness=1, color=COLOR_LIGHT, spaceAfter=6))
+    param_data = [
+        [t["param_cutoff"], cutoff_month],
+        [t["param_actual"],  ", ".join(actual_months)],
+        [t["param_forecast"], ", ".join(forecast_months)],
+        [t["param_sens"],    f"{sensitivity_mult:.2f}x"],
+        [t["param_mom"],     f"{momentum_mult:.2f}x"],
+        [t["param_inf"],     f"{cagr_inf}%"],
+        [t["param_ops"],     f"{cagr_ops}%"],
+    ]
+    param_rows = [[Paragraph(str(r[0]), s_body_bold), Paragraph(str(r[1]), s_body)] for r in param_data]
+    tbl_params = make_table(
+        [[Paragraph("Parámetro" if lang=="es" else "Parameter", s_body_bold),
+          Paragraph("Valor" if lang=="es" else "Value", s_body_bold)]] + param_rows,
+        [9*cm, 9*cm]
+    )
+    story.append(tbl_params)
+    story.append(Spacer(1, 0.3*cm))
+
+    # ── Sección 3: Resumen por categoría ──────────────────────
+    story.append(Paragraph(t["sec_summary"], s_h1))
+    story.append(HRFlowable(width="100%", thickness=1, color=COLOR_LIGHT, spaceAfter=6))
+
+    sum_cols = [chart_dim, "Actual_YTD", "Budget_FY_Model", "Forecast_FY_Modelo", "Var_vs_Budget"]
+    sum_show = summary[[c for c in sum_cols if c in summary.columns]].copy()
+
+    header_row = [
+        Paragraph(t["col_cat"], s_body_bold),
+        Paragraph(t["col_actual"], s_body_bold),
+        Paragraph(t["col_budget"], s_body_bold),
+        Paragraph(t["col_forecast"], s_body_bold),
+        Paragraph(t["col_var"], s_body_bold),
+    ]
+    data_rows = [header_row]
+    for _, row in sum_show.iterrows():
+        var_v = float(row.get("Var_vs_Budget", 0))
+        var_color = colors.HexColor("#C00000") if var_v > 0 else (colors.HexColor("#375623") if var_v < 0 else colors.black)
+        data_rows.append([
+            Paragraph(str(row.get(chart_dim, "")), s_body),
+            Paragraph(money(row.get("Actual_YTD", 0)), s_body),
+            Paragraph(money(row.get("Budget_FY_Model", 0)), s_body),
+            Paragraph(money(row.get("Forecast_FY_Modelo", 0)), s_body),
+            Paragraph(f'<font color="#{("C00000" if var_v>0 else "375623" if var_v<0 else "000000")}">{money(var_v)}</font>', s_body),
+        ])
+
+    tbl_sum = make_table(data_rows, [4.5*cm, 3.5*cm, 3.5*cm, 3.5*cm, 3.5*cm])
+    story.append(tbl_sum)
+    story.append(Spacer(1, 0.3*cm))
+
+    # ── Sección 4: LRP 5 años ─────────────────────────────────
+    story.append(PageBreak())
+    story.append(Paragraph(t["sec_lrp"], s_h1))
+    story.append(HRFlowable(width="100%", thickness=1, color=COLOR_LIGHT, spaceAfter=6))
+
+    lrp_num_cols = [c for c in resumen_5y.columns if c not in ["Contexto_Mina", "Naturaleza"]]
+    lrp_dim_cols = [c for c in ["Contexto_Mina", "Naturaleza"] if c in resumen_5y.columns]
+    all_lrp_cols = lrp_dim_cols + lrp_num_cols
+
+    if len(all_lrp_cols) > 0 and len(resumen_5y) > 0:
+        lrp_show = resumen_5y[all_lrp_cols].copy()
+        # Mostrar solo FY cols (no meses individuales para que quepa en página)
+        fy_cols_only = [c for c in lrp_num_cols if c.startswith("FY")]
+        cols_to_show_lrp = lrp_dim_cols + fy_cols_only
+        if cols_to_show_lrp:
+            lrp_show = lrp_show[cols_to_show_lrp]
+            n_cols = len(lrp_show.columns)
+            dim_w  = 4.5*cm
+            num_w  = (18*cm - dim_w * len(lrp_dim_cols)) / max(len(fy_cols_only), 1)
+            lrp_header = [Paragraph(str(c), s_body_bold) for c in lrp_show.columns]
+            lrp_rows = [lrp_header]
+            for _, row in lrp_show.iterrows():
+                lrp_row = []
+                for i, (col, val) in enumerate(row.items()):
+                    if col in lrp_dim_cols:
+                        lrp_row.append(Paragraph(str(val), s_body_bold))
+                    else:
+                        try:
+                            lrp_row.append(Paragraph(f"{float(val)/1_000_000:,.2f}", s_body))
+                        except Exception:
+                            lrp_row.append(Paragraph(str(val), s_body))
+                lrp_rows.append(lrp_row)
+            col_widths_lrp = [dim_w]*len(lrp_dim_cols) + [num_w]*len(fy_cols_only)
+            story.append(make_table(lrp_rows, col_widths_lrp))
+    story.append(Spacer(1, 0.3*cm))
+
+    # ── Sección 5: Hallazgos y recomendaciones ─────────────────
+    story.append(Paragraph(t["sec_hallazgos"], s_h1))
+    story.append(HRFlowable(width="100%", thickness=1, color=COLOR_LIGHT, spaceAfter=6))
+    story.append(Paragraph(t["hallazgo_1"], s_body))
+    story.append(Paragraph(t["hallazgo_2"], s_body))
+    story.append(Paragraph(t["hallazgo_3"], s_body))
+    story.append(Spacer(1, 0.2*cm))
+    story.append(Paragraph(t["methodology"], s_h2))
+    story.append(Paragraph(t["method_body"], s_body))
+    story.append(Spacer(1, 0.2*cm))
+    for rec in [t["rec_1"], t["rec_2"], t["rec_3"]]:
+        story.append(Paragraph(f"• {rec}", s_body))
+    story.append(Spacer(1, 0.3*cm))
+
+    # ── Sección 6: Registro de sensibilidades ─────────────────
+    story.append(Paragraph(t["sec_sens"], s_h1))
+    story.append(HRFlowable(width="100%", thickness=1, color=COLOR_LIGHT, spaceAfter=6))
+    if not registro:
+        story.append(Paragraph(t["no_sens"], s_caption))
+    else:
+        reg_cols_show = ["Escenario", "Timestamp", "Var Diesel", "Var FX", "Var MO",
+                         "Budget Base LRP (US$ MM)", "Impacto Sens. (US$ MM)", "Budget Ajustado LRP (US$ MM)", "Var % vs Base"]
+        df_reg = pd.DataFrame(registro)
+        cols_avail = [c for c in reg_cols_show if c in df_reg.columns]
+        df_reg_show = df_reg[cols_avail]
+        reg_header = [Paragraph(str(c), s_body_bold) for c in df_reg_show.columns]
+        reg_rows = [reg_header]
+        col_w_reg = [18*cm / len(cols_avail)] * len(cols_avail)
+        for _, row in df_reg_show.iterrows():
+            reg_rows.append([Paragraph(str(v), s_body) for v in row.values])
+        story.append(make_table(reg_rows, col_w_reg))
+
+    # Footer en última página
+    story.append(Spacer(1, 1*cm))
+    story.append(HRFlowable(width="100%", thickness=1, color=COLOR_ACCENT))
+    story.append(Paragraph(t["footer"], s_caption))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+def generar_docx_informe(
+    lang: str,
+    actual_total: float,
+    budget_total: float,
+    forecast_total: float,
+    var_total: float,
+    var_pct: float,
+    summary: pd.DataFrame,
+    chart_dim: str,
+    actual_months: List[str],
+    forecast_months: List[str],
+    cutoff_month: str,
+    sensitivity_mult: float,
+    momentum_mult: float,
+    cagr_inf: float,
+    cagr_ops: float,
+    resumen_5y: pd.DataFrame,
+    registro: List[dict],
+) -> bytes:
+    """Genera informe ejecutivo en DOCX via Node.js docx."""
+
+    T = {
+        "es": {
+            "title": "Informe Ejecutivo — Forecast 5+7 No Lineal Dinámico",
+            "subtitle": "Análisis de Presupuesto y Proyección Minera",
+            "date_label": "Fecha de generación",
+            "period_label": "Período analizado",
+            "period": f"Real: Jan — {cutoff_month} | Forecast: {forecast_months[0] if forecast_months else '—'} — {forecast_months[-1] if forecast_months else '—'}",
+            "sec_kpi": "1. KPIs Ejecutivos",
+            "sec_model": "2. Parámetros del Modelo",
+            "sec_summary": "3. Resumen por Categoría",
+            "sec_lrp": "4. Simulación LRP 5 Años (US$ MM)",
+            "sec_hallazgos": "5. Hallazgos y Recomendaciones",
+            "sec_sens": "6. Registro de Sensibilidades",
+            "col_cat": "Categoría", "col_actual": "Actual YTD", "col_budget": "Budget FY",
+            "col_forecast": "Forecast FY", "col_var": "Var vs Budget",
+            "param_cutoff": "Último mes real", "param_actual": "Meses reales",
+            "param_forecast": "Meses forecast", "param_sens": "Sensibilidad ejecución",
+            "param_mom": "Peso tendencia", "param_inf": "Inflación anual", "param_ops": "Crec. operacional",
+            "kpi_actual": "Actual YTD", "kpi_budget": "Budget FY",
+            "kpi_forecast": "Forecast FY Modelo", "kpi_var": "Variación vs Budget",
+            "hallazgo_1": f"El Forecast FY Modelo proyecta {money(forecast_total)}, con desviación {var_pct:+.1%} vs Budget FY de {money(budget_total)}.",
+            "hallazgo_2": "Las categorías con mayor peso presupuestario concentran las principales desviaciones.",
+            "hallazgo_3": f"LRP 5 años con inflación {cagr_inf}% y crecimiento operacional {cagr_ops}%.",
+            "rec_1": "Activar plan de control en categorías con desviación positiva superior al 10%.",
+            "rec_2": "Revisar reprogramación en partidas con subejecución relevante.",
+            "rec_3": "Implementar alertas tempranas mensuales por naturaleza de gasto.",
+            "footer": "Modelo Forecast 5+7 No Lineal Dinámico — Uso interno",
+            "no_sens": "No se registraron escenarios de sensibilidad.",
+        },
+        "en": {
+            "title": "Executive Report — Dynamic Non-Linear 5+7 Forecast",
+            "subtitle": "Mining Budget Analysis & Projection",
+            "date_label": "Generated on",
+            "period_label": "Analysis period",
+            "period": f"Actual: Jan — {cutoff_month} | Forecast: {forecast_months[0] if forecast_months else '—'} — {forecast_months[-1] if forecast_months else '—'}",
+            "sec_kpi": "1. Executive KPIs",
+            "sec_model": "2. Model Parameters",
+            "sec_summary": "3. Summary by Category",
+            "sec_lrp": "4. 5-Year LRP Simulation (US$ MM)",
+            "sec_hallazgos": "5. Findings & Recommendations",
+            "sec_sens": "6. Sensitivity Scenarios Log",
+            "col_cat": "Category", "col_actual": "Actual YTD", "col_budget": "Budget FY",
+            "col_forecast": "Forecast FY", "col_var": "Var vs Budget",
+            "param_cutoff": "Last actual month", "param_actual": "Actual months",
+            "param_forecast": "Forecast months", "param_sens": "Execution sensitivity",
+            "param_mom": "Trend weight", "param_inf": "Annual inflation", "param_ops": "Ops growth",
+            "kpi_actual": "Actual YTD", "kpi_budget": "Budget FY",
+            "kpi_forecast": "Forecast FY Model", "kpi_var": "Variance vs Budget",
+            "hallazgo_1": f"FY Model Forecast projects {money(forecast_total)}, {var_pct:+.1%} deviation vs FY Budget of {money(budget_total)}.",
+            "hallazgo_2": "Categories with the highest budget weight concentrate the main deviations.",
+            "hallazgo_3": f"5-year LRP with {cagr_inf}% inflation and {cagr_ops}% operational growth.",
+            "rec_1": "Activate control plan for categories with positive deviation above 10%.",
+            "rec_2": "Review rescheduling for categories with significant under-execution.",
+            "rec_3": "Implement monthly early-warning alerts by cost nature.",
+            "footer": "Dynamic Non-Linear 5+7 Forecast Model — Internal use",
+            "no_sens": "No sensitivity scenarios were recorded.",
+        },
+    }
+    t = T[lang]
+
+    # Preparar datos de resumen
+    sum_cols = [chart_dim, "Actual_YTD", "Budget_FY_Model", "Forecast_FY_Modelo", "Var_vs_Budget"]
+    sum_show = summary[[c for c in sum_cols if c in summary.columns]].copy()
+
+    fy_cols_lrp = [c for c in resumen_5y.columns if c.startswith("FY")]
+    lrp_dim_cols = [c for c in ["Contexto_Mina", "Naturaleza"] if c in resumen_5y.columns]
+    lrp_show_cols = lrp_dim_cols + fy_cols_lrp
+    lrp_show = resumen_5y[[c for c in lrp_show_cols if c in resumen_5y.columns]].copy()
+
+    reg_cols = ["Escenario", "Timestamp", "Var Diesel", "Var FX", "Var MO",
+                "Budget Base LRP (US$ MM)", "Impacto Sens. (US$ MM)", "Budget Ajustado LRP (US$ MM)", "Var % vs Base"]
+    df_reg = pd.DataFrame(registro) if registro else pd.DataFrame()
+    reg_avail = [c for c in reg_cols if not df_reg.empty and c in df_reg.columns]
+
+    # Serializar datos para el script Node
+    payload = {
+        "lang": lang,
+        "t": t,
+        "kpis": {
+            "actual": money(actual_total),
+            "budget": money(budget_total),
+            "forecast": money(forecast_total),
+            "var_mm": money(var_total),
+            "var_pct": f"{var_pct:+.1%}",
+            "var_positive": var_total > 0,
+        },
+        "params": [
+            [t["param_cutoff"], cutoff_month],
+            [t["param_actual"], ", ".join(actual_months)],
+            [t["param_forecast"], ", ".join(forecast_months)],
+            [t["param_sens"], f"{sensitivity_mult:.2f}x"],
+            [t["param_mom"], f"{momentum_mult:.2f}x"],
+            [t["param_inf"], f"{cagr_inf}%"],
+            [t["param_ops"], f"{cagr_ops}%"],
+        ],
+        "summary_headers": [t["col_cat"], t["col_actual"], t["col_budget"], t["col_forecast"], t["col_var"]],
+        "summary_rows": [
+            [
+                str(row.get(chart_dim, "")),
+                money(row.get("Actual_YTD", 0)),
+                money(row.get("Budget_FY_Model", 0)),
+                money(row.get("Forecast_FY_Modelo", 0)),
+                money(row.get("Var_vs_Budget", 0)),
+            ]
+            for _, row in sum_show.iterrows()
+        ],
+        "lrp_headers": list(lrp_show.columns),
+        "lrp_rows": [
+            [
+                (f"{float(v)/1_000_000:,.2f}" if col not in lrp_dim_cols else str(v))
+                for col, v in row.items()
+            ]
+            for _, row in lrp_show.iterrows()
+        ],
+        "reg_headers": reg_avail,
+        "reg_rows": [
+            [str(df_reg.loc[i, c]) for c in reg_avail]
+            for i in df_reg.index
+        ] if not df_reg.empty else [],
+        "date": datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
+    }
+
+    script = r"""
+const fs = require('fs');
+const {
+  Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
+  HeadingLevel, AlignmentType, WidthType, BorderStyle, ShadingType,
+  LevelFormat, PageNumber, Footer, Header, PageOrientation,
+  VerticalAlign, TableOfContents
+} = require('docx');
+
+const payload = JSON.parse(fs.readFileSync('/tmp/docx_payload.json', 'utf8'));
+const t = payload.t;
+
+const BLUE_DARK  = "1F4E79";
+const BLUE_MID   = "2E75B6";
+const BLUE_LIGHT = "D9EAF7";
+const GRAY       = "F2F2F2";
+const RED        = "C00000";
+const GREEN      = "375623";
+
+function hRule() {
+  return new Paragraph({
+    border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: BLUE_MID, space: 1 } },
+    spacing: { after: 80 },
+    children: []
+  });
+}
+
+function h1(text) {
+  return new Paragraph({
+    heading: HeadingLevel.HEADING_1,
+    spacing: { before: 200, after: 80 },
+    children: [new TextRun({ text, color: BLUE_DARK, size: 28, bold: true, font: "Arial" })]
+  });
+}
+function h2(text) {
+  return new Paragraph({
+    heading: HeadingLevel.HEADING_2,
+    spacing: { before: 140, after: 60 },
+    children: [new TextRun({ text, color: BLUE_MID, size: 24, bold: true, font: "Arial" })]
+  });
+}
+function body(text, bold=false) {
+  return new Paragraph({
+    spacing: { after: 60 },
+    children: [new TextRun({ text: String(text), size: 18, bold, font: "Arial" })]
+  });
+}
+function bullet(text) {
+  return new Paragraph({
+    spacing: { after: 60 },
+    indent: { left: 360, hanging: 180 },
+    children: [new TextRun({ text: `• ${text}`, size: 18, font: "Arial" })]
+  });
+}
+
+const border = { style: BorderStyle.SINGLE, size: 1, color: "CCCCCC" };
+const borders = { top: border, bottom: border, left: border, right: border };
+
+function makeTable(headers, rows, colWidths) {
+  const headerRow = new TableRow({
+    tableHeader: true,
+    children: headers.map((h, i) =>
+      new TableCell({
+        borders,
+        width: { size: colWidths[i], type: WidthType.DXA },
+        shading: { fill: BLUE_LIGHT, type: ShadingType.CLEAR },
+        margins: { top: 60, bottom: 60, left: 80, right: 80 },
+        children: [new Paragraph({ alignment: AlignmentType.CENTER,
+          children: [new TextRun({ text: String(h), bold: true, size: 16, color: BLUE_DARK, font: "Arial" })] })]
+      })
+    )
+  });
+
+  const dataRows = rows.map((row, ri) =>
+    new TableRow({
+      children: row.map((cell, ci) =>
+        new TableCell({
+          borders,
+          width: { size: colWidths[ci], type: WidthType.DXA },
+          shading: { fill: ri % 2 === 0 ? "FFFFFF" : GRAY, type: ShadingType.CLEAR },
+          margins: { top: 50, bottom: 50, left: 80, right: 80 },
+          children: [new Paragraph({
+            alignment: ci === 0 ? AlignmentType.LEFT : AlignmentType.RIGHT,
+            children: [new TextRun({ text: String(cell), size: 16, font: "Arial" })]
+          })]
+        })
+      )
+    })
+  );
+
+  return new Table({
+    width: { size: colWidths.reduce((a,b)=>a+b,0), type: WidthType.DXA },
+    columnWidths: colWidths,
+    rows: [headerRow, ...dataRows],
+  });
+}
+
+function kpiTable(kpis, t) {
+  const varColor = kpis.var_positive ? RED : GREEN;
+  function kpiCell(label, value, color) {
+    return new TableCell({
+      borders,
+      width: { size: 2160, type: WidthType.DXA },
+      shading: { fill: color, type: ShadingType.CLEAR },
+      margins: { top: 80, bottom: 80, left: 80, right: 80 },
+      verticalAlign: VerticalAlign.CENTER,
+      children: [
+        new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 30 },
+          children: [new TextRun({ text: label, size: 16, color: "FFFFFF", font: "Arial" })] }),
+        new Paragraph({ alignment: AlignmentType.CENTER,
+          children: [new TextRun({ text: value, size: 22, bold: true, color: "FFFFFF", font: "Arial" })] }),
+      ]
+    });
+  }
+  return new Table({
+    width: { size: 8640, type: WidthType.DXA },
+    columnWidths: [2160, 2160, 2160, 2160],
+    rows: [new TableRow({ children: [
+      kpiCell(t.kpi_actual,   kpis.actual,   BLUE_MID),
+      kpiCell(t.kpi_budget,   kpis.budget,   BLUE_MID),
+      kpiCell(t.kpi_forecast, kpis.forecast, BLUE_MID),
+      kpiCell(`${t.kpi_var}\n${kpis.var_pct}`, kpis.var_mm, varColor),
+    ]})],
+  });
+}
+
+const summaryColWidths = [2400, 1560, 1560, 1560, 1560];
+const paramsColWidths  = [4320, 4320];
+const lrpColWidths = payload.lrp_headers.length > 0
+  ? (() => { const dim = payload.lrp_headers.filter(h=>h==="Contexto_Mina"||h==="Naturaleza").length;
+             const fy  = payload.lrp_headers.length - dim;
+             return [...Array(dim).fill(2160), ...Array(fy).fill(Math.floor((8640-2160*dim)/Math.max(fy,1)))]; })()
+  : [8640];
+
+const regColWidths = payload.reg_headers.length > 0
+  ? Array(payload.reg_headers.length).fill(Math.floor(8640/payload.reg_headers.length))
+  : [8640];
+
+const children = [
+  // Título
+  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 200, after: 80 },
+    children: [new TextRun({ text: t.title, color: BLUE_DARK, size: 40, bold: true, font: "Arial" })] }),
+  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 60 },
+    children: [new TextRun({ text: t.subtitle, color: BLUE_MID, size: 24, font: "Arial" })] }),
+  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 60 },
+    children: [new TextRun({ text: `${t.date_label}: ${payload.date}`, size: 18, color: "666666", font: "Arial" })] }),
+  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 160 },
+    children: [new TextRun({ text: `${t.period_label}: ${t.period}`, size: 18, color: "666666", font: "Arial" })] }),
+  hRule(),
+
+  // KPIs
+  h1(t.sec_kpi),
+  kpiTable(payload.kpis, t),
+  new Paragraph({ spacing: { after: 160 }, children: [] }),
+
+  // Parámetros
+  h1(t.sec_model),
+  makeTable(
+    [payload.lang === "es" ? "Parámetro" : "Parameter", payload.lang === "es" ? "Valor" : "Value"],
+    payload.params,
+    paramsColWidths
+  ),
+  new Paragraph({ spacing: { after: 160 }, children: [] }),
+
+  // Resumen
+  h1(t.sec_summary),
+  makeTable(payload.summary_headers, payload.summary_rows, summaryColWidths),
+  new Paragraph({ spacing: { after: 160 }, children: [] }),
+
+  // LRP
+  h1(t.sec_lrp),
+  ...(payload.lrp_rows.length > 0
+    ? [makeTable(payload.lrp_headers, payload.lrp_rows, lrpColWidths)]
+    : [body(payload.lang === "es" ? "Sin datos LRP disponibles." : "No LRP data available.")]),
+  new Paragraph({ spacing: { after: 160 }, children: [] }),
+
+  // Hallazgos
+  h1(t.sec_hallazgos),
+  body(t.hallazgo_1), body(t.hallazgo_2), body(t.hallazgo_3),
+  new Paragraph({ spacing: { after: 80 }, children: [] }),
+  bullet(t.rec_1), bullet(t.rec_2), bullet(t.rec_3),
+  new Paragraph({ spacing: { after: 160 }, children: [] }),
+
+  // Registro sensibilidades
+  h1(t.sec_sens),
+  ...(payload.reg_rows.length > 0
+    ? [makeTable(payload.reg_headers, payload.reg_rows, regColWidths)]
+    : [body(t.no_sens)]),
+  new Paragraph({ spacing: { after: 200 }, children: [] }),
+
+  // Footer line
+  new Paragraph({
+    border: { top: { style: BorderStyle.SINGLE, size: 4, color: BLUE_MID, space: 1 } },
+    spacing: { before: 100 },
+    alignment: AlignmentType.CENTER,
+    children: [new TextRun({ text: t.footer, size: 16, color: "888888", font: "Arial" })]
+  }),
+];
+
+const doc = new Document({
+  styles: {
+    default: { document: { run: { font: "Arial", size: 20 } } },
+    paragraphStyles: [
+      { id: "Heading1", name: "Heading 1", basedOn: "Normal", next: "Normal", quickFormat: true,
+        run: { size: 28, bold: true, font: "Arial" }, paragraph: { spacing: { before: 200, after: 80 }, outlineLevel: 0 } },
+      { id: "Heading2", name: "Heading 2", basedOn: "Normal", next: "Normal", quickFormat: true,
+        run: { size: 24, bold: true, font: "Arial" }, paragraph: { spacing: { before: 140, after: 60 }, outlineLevel: 1 } },
+    ]
+  },
+  sections: [{
+    properties: {
+      page: {
+        size: { width: 12240, height: 15840 },
+        margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 }
+      }
+    },
+    footers: {
+      default: new Footer({
+        children: [new Paragraph({
+          alignment: AlignmentType.CENTER,
+          children: [
+            new TextRun({ text: t.footer + " — ", size: 16, color: "888888", font: "Arial" }),
+            new TextRun({ children: [PageNumber.CURRENT], size: 16, color: "888888", font: "Arial" }),
+          ]
+        })]
+      })
+    },
+    children
+  }]
+});
+
+Packer.toBuffer(doc).then(buf => {
+  fs.writeFileSync('/tmp/informe_output.docx', buf);
+  console.log('OK');
+});
+"""
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, path='/tmp') if False else open('/tmp/docx_payload.json', 'w') as f:
+        json.dump(payload, f, ensure_ascii=False, default=str)
+
+    script_path = '/tmp/gen_informe.js'
+    with open(script_path, 'w') as f:
+        f.write(script)
+
+    result = subprocess.run(['node', script_path], capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        raise RuntimeError(f"Error generando DOCX: {result.stderr}")
+
+    with open('/tmp/informe_output.docx', 'rb') as f:
+        return f.read()
+
+
 # ═══════════════════════════════════════════════════════════════
 # ESTADO DE SESIÓN PARA REGISTRO DE SENSIBILIDADES
 # ═══════════════════════════════════════════════════════════════
@@ -669,11 +1443,12 @@ if "registro_sensibilidades" not in st.session_state:
 # ═══════════════════════════════════════════════════════════════
 # PESTAÑAS PRINCIPALES
 # ═══════════════════════════════════════════════════════════════
-tab_actual, tab_5y, tab_sens, tab_registro = st.tabs([
+tab_actual, tab_5y, tab_sens, tab_registro, tab_informe = st.tabs([
     "📊 Forecast Año Actual (5+7)",
     "🚀 Simulación LRP a 5 Años",
     "⚙️ Módulo de Sensibilidades",
     "📋 Registro de Versiones",
+    "📄 Informe Ejecutivo",
 ])
 
 # ─────────────────────────────────────────────
@@ -1154,6 +1929,136 @@ with tab_registro:
             st.session_state["registro_sensibilidades"] = []
             st.rerun()
 
-st.caption("Modelo diseñado para defensa académica: combina ejecución acumulada, tendencia reciente, curva no lineal y contexto minero.")
+# ─────────────────────────────────────────────
+# PESTAÑA 5: INFORME EJECUTIVO
+# ─────────────────────────────────────────────
+with tab_informe:
+    st.subheader("📄 Informe Ejecutivo")
+    st.caption("Genera y descarga el informe completo con KPIs, tablas detalladas, simulación LRP y registro de sensibilidades.")
+
+    if len(filtered) == 0:
+        st.warning("⚠️ No hay datos cargados. Sube un archivo Excel y ajusta los filtros.")
+    else:
+        # Necesitamos resumen_5y para el informe — recalcularlo si no existe en scope
+        año_base_inf = datetime.datetime.now().year
+        df_5y_inf = simular_5_anos(filtered, cagr_inf, cagr_ops)
+        cols_agrup_inf = ["Contexto_Mina"]
+        if "Naturaleza" in df_5y_inf.columns:
+            cols_agrup_inf = ["Contexto_Mina", "Naturaleza"]
+        año_cols_inf = ["Año_0_Base", "Año_1", "Año_2", "Año_3", "Año_4", "Año_5"]
+        resumen_5y_inf_raw = df_5y_inf.groupby(cols_agrup_inf)[año_cols_inf].sum().reset_index()
+        estac_inf = calcular_estacionalidad_mensual(filtered, actual_months, forecast_months)
+        año1_lbl_inf = año_base_inf + 1
+        meses_año1_inf = [f"{m}-{str(año1_lbl_inf)[2:]}" for m in MONTH_ORDER]
+        for m, mc in zip(MONTH_ORDER, meses_año1_inf):
+            resumen_5y_inf_raw[mc] = resumen_5y_inf_raw["Año_1"] * estac_inf[m]
+        rename_inf = {
+            "Año_0_Base": f"FY{str(año_base_inf)[2:]}",
+            "Año_2": f"FY{str(año_base_inf+2)[2:]}",
+            "Año_3": f"FY{str(año_base_inf+3)[2:]}",
+            "Año_4": f"FY{str(año_base_inf+4)[2:]}",
+            "Año_5": f"FY{str(año_base_inf+5)[2:]}",
+        }
+        resumen_5y_inf = resumen_5y_inf_raw.rename(columns=rename_inf).drop(columns=["Año_1"])
+        fy_ac_inf = [f"FY{str(año_base_inf+i)[2:]}" for i in [0, 2, 3, 4, 5]]
+        cols_ord_inf = cols_agrup_inf + [fy_ac_inf[0]] + meses_año1_inf + fy_ac_inf[1:]
+        resumen_5y_inf = resumen_5y_inf[[c for c in cols_ord_inf if c in resumen_5y_inf.columns]]
+
+        st.markdown("---")
+        st.markdown("### 🌐 Idioma / Language")
+        col_lang1, col_lang2 = st.columns(2)
+        gen_es = col_lang1.checkbox("🇨🇱 Español", value=True)
+        gen_en = col_lang2.checkbox("🇺🇸 English", value=True)
+
+        st.markdown("### 📂 Formato")
+        col_fmt1, col_fmt2 = st.columns(2)
+        gen_pdf  = col_fmt1.checkbox("PDF", value=True)
+        gen_docx = col_fmt2.checkbox("Word (.docx)", value=True)
+
+        st.markdown("---")
+
+        # Preview de lo que incluirá el informe
+        with st.expander("📋 Vista previa del contenido del informe", expanded=True):
+            p1, p2, p3, p4 = st.columns(4)
+            p1.metric("Actual YTD", money(actual_total))
+            p2.metric("Budget FY",  money(budget_total))
+            p3.metric("Forecast FY", money(forecast_total))
+            p4.metric("Variación",  f"{var_pct:+.1%}")
+            st.markdown(f"""
+**El informe incluirá:**
+- ✅ KPIs ejecutivos (Actual YTD, Budget FY, Forecast FY, Variación)
+- ✅ Parámetros del modelo (sensibilidades, inflación, crecimiento)
+- ✅ Tabla resumen por categoría ({len(summary)} categorías)
+- ✅ Simulación LRP 5 años ({año1_lbl_inf}–{año_base_inf+5})
+- ✅ Hallazgos automáticos y recomendaciones
+- ✅ Registro de sensibilidades ({len(st.session_state['registro_sensibilidades'])} escenario(s) guardado(s))
+            """)
+
+        st.markdown("---")
+
+        if st.button("🚀 Generar Informe(s)", use_container_width=True, type="primary"):
+            args_informe = dict(
+                actual_total=actual_total,
+                budget_total=budget_total,
+                forecast_total=forecast_total,
+                var_total=var_total,
+                var_pct=var_pct,
+                summary=summary,
+                chart_dim=chart_dim,
+                actual_months=actual_months,
+                forecast_months=forecast_months,
+                cutoff_month=cutoff_month,
+                sensitivity_mult=sensitivity_mult,
+                momentum_mult=momentum_mult,
+                cagr_inf=cagr_inf,
+                cagr_ops=cagr_ops,
+                resumen_5y=resumen_5y_inf,
+                registro=st.session_state["registro_sensibilidades"],
+            )
+
+            langs = []
+            if gen_es: langs.append("es")
+            if gen_en: langs.append("en")
+
+            if not langs:
+                st.warning("Selecciona al menos un idioma.")
+            elif not gen_pdf and not gen_docx:
+                st.warning("Selecciona al menos un formato.")
+            else:
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+                generated = {}
+
+                with st.spinner("Generando informe(s)..."):
+                    for lang in langs:
+                        lang_label = "ES" if lang == "es" else "EN"
+                        if gen_pdf:
+                            try:
+                                pdf_bytes = generar_pdf_informe(lang=lang, **args_informe)
+                                generated[f"pdf_{lang}"] = (pdf_bytes, f"informe_forecast_{lang_label}_{ts}.pdf",
+                                                             "application/pdf")
+                            except Exception as e:
+                                st.error(f"Error PDF {lang_label}: {e}")
+                        if gen_docx:
+                            try:
+                                docx_bytes = generar_docx_informe(lang=lang, **args_informe)
+                                generated[f"docx_{lang}"] = (docx_bytes, f"informe_forecast_{lang_label}_{ts}.docx",
+                                                              "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                            except Exception as e:
+                                st.error(f"Error DOCX {lang_label}: {e}")
+
+                if generated:
+                    st.success(f"✅ {len(generated)} archivo(s) listo(s). Descárgalos a continuación:")
+                    for key, (data, fname, mime) in generated.items():
+                        lang_flag = "🇨🇱" if "_es" in key else "🇺🇸"
+                        fmt_icon  = "📄" if "pdf" in key else "📝"
+                        fmt_label = "PDF" if "pdf" in key else "Word"
+                        st.download_button(
+                            label=f"{lang_flag} {fmt_icon} Descargar {fmt_label} — {'Español' if '_es' in key else 'English'}",
+                            data=data,
+                            file_name=fname,
+                            mime=mime,
+                            use_container_width=True,
+                            key=f"dl_{key}_{ts}",
+                        )
 
 st.caption("Modelo diseñado para defensa académica: combina ejecución acumulada, tendencia reciente, curva no lineal y contexto minero.")
